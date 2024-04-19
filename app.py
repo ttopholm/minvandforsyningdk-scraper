@@ -11,6 +11,8 @@ from json import dumps
 from time import sleep
 
 
+_run_timer = 60 * 60 #1 hour
+
 mqtt_host = environ.get('mqtt-host', None)
 mqtt_port = environ.get('mqtt-port', 1883)
 mqtt_topic = environ.get('mqtt-topic', 'minvandforsyningdk/total')
@@ -79,7 +81,7 @@ def scrape():
 if __name__ == "__main__":
     while True:
         scrape()
-        sleep(60)
+        sleep(_run_timer)
 
 
 
