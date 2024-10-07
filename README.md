@@ -14,7 +14,7 @@ docker run ghcr.io/ttopholm/minvandforsyningdk-scraper:latest
 
 ## Docker compose
 
-To use the docker-compose, you can run it with the following command in the directory where you have your docker-compose.yml file:
+To use the docker-compose, you can run it with the following command in the directory where you have your docker-compose.yml file, it will download the scraper and requirements for the scraper (not mqtt broker):
 ```
 docker-compose up -d
 ```
