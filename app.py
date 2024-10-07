@@ -21,13 +21,13 @@ mqtt_broker = env.str('mqtt-broker')
 mvf_username = env.str('username')
 mvf_password = env.str('password')
 mvf_utility_code = env.str('utility-code')
-webdriver_remote_url = env.get('webdriver-remote-url')
+webdriver_remote_url = env.str('webdriver-remote-url')
 
 # optional variables
 mqtt_port = env.int('mqtt-port', 1883)
-mqtt_topic = env.get('mqtt-topic', 'minvandforsyningdk/total')
-mqtt_username = env.get('mqtt-username', None)
-mqtt_password = env.get('mqtt-password', None)
+mqtt_topic = env.str('mqtt-topic', 'minvandforsyningdk/total')
+mqtt_username = env.str('mqtt-username', None)
+mqtt_password = env.str('mqtt-password', None)
 
 
 mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
