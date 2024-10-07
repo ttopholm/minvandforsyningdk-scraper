@@ -9,29 +9,32 @@ from random import randint
 from paho.mqtt.publish import single as publish
 from json import dumps
 from time import sleep
+from environs import Env
 
+env = Env()
+env.read_env()
 
 _run_timer = 60 * 60 #1 hour
 
-mqtt_host = environ.get('mqtt-host', None)
-mqtt_port = environ.get('mqtt-port', 1883)
+# variables requireds
+mqtt_broker = env.str('mqtt-broker')
+mvf_username = environ.str('username')
+mvf_password = environ.str('password')
+mvf_utility_code = environ.str('utility-code')
+webdriver_remote_url = environ.get('webdriver-remote-url')
+
+# optional variables
+mqtt_port = env.int('mqtt-port', 1883)
 mqtt_topic = environ.get('mqtt-topic', 'minvandforsyningdk/total')
 mqtt_username = environ.get('mqtt-username', None)
-mqtt_password = environ.get('mqtt-passowrd', None)
+mqtt_password = environ.get('mqtt-password', None)
+
+
 mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
+
 mqtt_auth = None
 if mqtt_username is not None:
     mqtt_auth = {"username": mqtt_username, "password": mqtt_password}
-
-webdriver_remote_url = environ.get('webdriver-remote-url', None)
-
-mvf_username = environ.get('username', None)
-mvf_password = environ.get('password', None)
-mvf_utility_code = environ.get('utility-code', None)
-
-if any(v is None for v in [mvf_username, mvf_password, mvf_utility_code, webdriver_remote_url, mqtt_host]):
-    print("Environment variable missing")
-    exit(1)
 
 def wait_for_element(wd, elm, timeout=10):
     try:
@@ -69,11 +72,11 @@ def scrape():
             "timestamp": _date  
         })  
         try:
-            publish(mqtt_topic, mqtt_msg, hostname=mqtt_host, port=mqtt_port, auth=mqtt_auth)
+            publish(mqtt_topic, mqtt_msg, hostname=mqtt_broker, port=mqtt_port, auth=mqtt_auth)
         except ConnectionRefusedError:
             print("Can't connect to mqtt server")
-    except:
-        print("keep running")
+    except Exception as e:
+        print(e)
     finally:
         browser.quit()
 
