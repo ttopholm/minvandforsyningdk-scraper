@@ -18,16 +18,16 @@ _run_timer = 60 * 60 #1 hour
 
 # variables requireds
 mqtt_broker = env.str('mqtt-broker')
-mvf_username = environ.str('username')
-mvf_password = environ.str('password')
-mvf_utility_code = environ.str('utility-code')
-webdriver_remote_url = environ.get('webdriver-remote-url')
+mvf_username = env.str('username')
+mvf_password = env.str('password')
+mvf_utility_code = env.str('utility-code')
+webdriver_remote_url = env.get('webdriver-remote-url')
 
 # optional variables
 mqtt_port = env.int('mqtt-port', 1883)
-mqtt_topic = environ.get('mqtt-topic', 'minvandforsyningdk/total')
-mqtt_username = environ.get('mqtt-username', None)
-mqtt_password = environ.get('mqtt-password', None)
+mqtt_topic = env.get('mqtt-topic', 'minvandforsyningdk/total')
+mqtt_username = env.get('mqtt-username', None)
+mqtt_password = env.get('mqtt-password', None)
 
 
 mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
