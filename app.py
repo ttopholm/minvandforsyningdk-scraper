@@ -53,7 +53,7 @@ def scrape():
         browser.get("https://www.minvandforsyning.dk/LoginIntermediate")
         wait_for_element(browser, '/html/body/app/body/div[2]/div/div/div[3]/button', 10)
         browser.find_element(By.XPATH, '//html/body/app/body/div[2]/div/div/div[3]/button').click()
-        browser.find_element(By.XPATH, "//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[1]/button").click()
+        browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[1]/button').click()
         wait_for_element(browser, "//input[@type='text']", 10)
         browser.find_element(By.XPATH, "//input[@type='text']").send_keys(mvf_username)
         browser.find_element(By.XPATH, "//input[@type='password']").send_keys(mvf_password)
