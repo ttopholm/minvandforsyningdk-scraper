@@ -4,7 +4,7 @@ services:
     shm_size: '2g'
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
+      test: ["CMD", "curl", "-f", "http://selenium:4444/wd/hub/status"]
       interval: 20s
       timeout: 10s
       retries: 3
