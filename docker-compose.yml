@@ -1,15 +1,17 @@
-version: '3.5'
-
 services:
   selenium:
     image: selenium/standalone-chrome:latest
-    environment:
-      - SE_START_XVFB=false
-      - SE_START_VNC=false
     shm_size: '2g'
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4444/wd/hub/status"]
+      interval: 2m
+      timeout: 10s
+      retries: 3
 
   minvandforsyning:
     image: ghcr.io/ttopholm/minvandforsyningdk-scraper:latest
+    restart: always
     environment:
       - webdriver-remote-url=http://selenium:4444
       - mqtt-host=[mqtt host]
@@ -17,5 +19,6 @@ services:
       - password=[adgangskode]
       - utility-code=[forsyning]
      depends_on:
-      selenium
+      selenium:
+        condition: service_healthy
 

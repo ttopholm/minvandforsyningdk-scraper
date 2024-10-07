@@ -46,7 +46,7 @@ def wait_for_element(wd, elm, timeout=10):
 
 def scrape():   
     chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--incognito")
     browser = webdriver.Remote(webdriver_remote_url, options=chrome_options)
 
     try:
@@ -75,8 +75,8 @@ def scrape():
             publish(mqtt_topic, mqtt_msg, hostname=mqtt_broker, port=mqtt_port, auth=mqtt_auth)
         except ConnectionRefusedError:
             print("Can't connect to mqtt server")
-    except Exception as e:
-        print(e)
+    except:
+        print("An error occurred, let me try again")
     finally:
         browser.quit()
 
