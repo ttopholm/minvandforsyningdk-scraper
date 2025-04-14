@@ -20,7 +20,6 @@ _run_timer = 60 * 60 #1 hour
 mqtt_broker = env.str('mqtt-broker')
 mvf_username = env.str('username')
 mvf_password = env.str('password')
-mvf_utility_code = env.str('utility-code')
 
 
 # optional variables
@@ -50,15 +49,16 @@ def scrape():
     browser = webdriver.Remote(webdriver_remote_url, options=chrome_options)
 
     try:
+        
         browser.get("https://www.minvandforsyning.dk/LoginIntermediate")
         wait_for_element(browser, '/html/body/app/body/div[2]/div/div/div[3]/button', 10)
         browser.find_element(By.XPATH, '//html/body/app/body/div[2]/div/div/div[3]/button').click()
-        browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[1]/button').click()
-        wait_for_element(browser, "//input[@type='text']", 10)
+        browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[2]/button').click()
+        wait_for_element(browser, '//*[@id="localAccountCollapse"]', 10)
+        browser.find_element(By.XPATH, '//*[@id="localAccountCollapse"]').click()
         browser.find_element(By.XPATH, "//input[@type='text']").send_keys(mvf_username)
         browser.find_element(By.XPATH, "//input[@type='password']").send_keys(mvf_password)
-        browser.find_element(By.XPATH, "(//input[@type='text'])[2]").send_keys(mvf_utility_code)
-        browser.find_element(By.XPATH, '//form/button').click()
+        browser.find_element(By.XPATH, '//*[@id="next"]').click()
         wait_for_element(browser, '//span[2]/b[2]', 10)
         _total = float(browser.find_element(By.XPATH, '//span[2]/b[2]').text.replace(',','.'))
         _meter_id = int(browser.find_element(By.XPATH, '//b').text)
