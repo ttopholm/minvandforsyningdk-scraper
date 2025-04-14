@@ -25,9 +25,8 @@ docker-compose up -d
 | Variable      | Description | Mandatory | Default Value |
 | ----------- | ----------- | ----------- | ----------- |
 | mqtt-broker      | Mqtt host | X ||
-| username     | Username on minvandforsyning.dk | X ||
-| password      | Password on minvandforsyning.dk| X ||
-| utility-code      | Utility code on minvandforsyning.dk       | X ||
+| username     | Username on minvandforsyning.dk (only rambøll local account is supported) | X ||
+| password      | Password on minvandforsyning.dk (only rambøll local account is supported)| X ||
 | mqtt-port    | Mqtt port | | 1883 |
 | mqtt-username   | The username for the mqtt broker | |  |
 | mqtt-password   | The password for the mqtt broker | |  |
