@@ -59,7 +59,7 @@ def scrape():
         browser.find_element(By.XPATH, "//input[@type='text']").send_keys(mvf_username)
         browser.find_element(By.XPATH, "//input[@type='password']").send_keys(mvf_password)
         browser.find_element(By.XPATH, '//*[@id="next"]').click()
-        wait_for_element(browser, '//span[2]/b[2]', 10)
+        wait_for_element(browser, '//span[2]/b[2]', 60)
         _total = float(browser.find_element(By.XPATH, '//span[2]/b[2]').text.replace(',','.'))
         _meter_id = int(browser.find_element(By.XPATH, '//b').text)
         _date = datetime.strftime(
@@ -75,7 +75,8 @@ def scrape():
             publish(mqtt_topic, mqtt_msg, hostname=mqtt_broker, port=mqtt_port, auth=mqtt_auth)
         except ConnectionRefusedError:
             print("Can't connect to mqtt server")
-    except:
+    except Exception as e:
+        print(f"An error occurred: {e}")
         print("An error occurred, let me try again")
     finally:
         browser.quit()
