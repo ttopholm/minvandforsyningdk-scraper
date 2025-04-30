@@ -63,7 +63,7 @@ def scrape():
         _total = float(browser.find_element(By.XPATH, '//span[2]/b[2]').text.replace(',','.'))
         _meter_id = int(browser.find_element(By.XPATH, '//b').text)
         _date = datetime.strftime(
-            datetime.strptime((browser.find_element(By.XPATH, '//span[2]/b').text) , 'kl. %H:%M, d. %d-%m-%Y'),
+            datetime.strptime((browser.find_element(By.XPATH, '//span[2]/b').text) , 'kl. %H.%M, d. %d.%m.%Y'),
             "%Y-%m-%d %H:%M:%S"
         )
         mqtt_msg = dumps({
