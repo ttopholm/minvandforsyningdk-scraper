@@ -28,6 +28,7 @@ mqtt_topic = env.str('mqtt-topic', 'minvandforsyningdk/total')
 mqtt_username = env.str('mqtt-username', None)
 mqtt_password = env.str('mqtt-password', None)
 webdriver_remote_url = env.str('webdriver-remote-url', 'http://selenium:4444')
+datetime_format = env.str('datetime-format', 'kl. %H.%M, d. %d.%m.%Y')
 
 mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
 
@@ -63,7 +64,7 @@ def scrape():
         _total = float(browser.find_element(By.XPATH, '//span[2]/b[2]').text.replace(',','.'))
         _meter_id = int(browser.find_element(By.XPATH, '//b').text)
         _date = datetime.strftime(
-            datetime.strptime((browser.find_element(By.XPATH, '//span[2]/b').text) , 'kl. %H.%M, d. %d.%m.%Y'),
+            datetime.strptime((browser.find_element(By.XPATH, '//span[2]/b').text) , datetime_format),
             "%Y-%m-%d %H:%M:%S"
         )
         mqtt_msg = dumps({

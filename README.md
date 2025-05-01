@@ -32,6 +32,7 @@ docker-compose up -d
 | mqtt-password   | The password for the mqtt broker | |  |
 | mqtt-topic   | The topic where  data is published to | | minvandforsyningdk/total |
 | webdriver-remote-url   | The url for the selenium server | | http://selenium:4444 |
+| datetime-format   | The format of the time on the webpage | | kl. %H.%M, d. %d.%m.%Y |
 
 
 # Output format
