@@ -50,10 +50,8 @@ def scrape():
     browser = webdriver.Remote(webdriver_remote_url, options=chrome_options)
 
     try:
-        
         browser.get("https://www.minvandforsyning.dk/LoginIntermediate")
-        wait_for_element(browser, '/html/body/app/body/div[2]/div/div/div[3]/button', 10)
-        browser.find_element(By.XPATH, '//html/body/app/body/div[2]/div/div/div[3]/button').click()
+        wait_for_element(browser, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[2]/button', 10)
         browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[2]/button').click()
         wait_for_element(browser, '//*[@id="localAccountCollapse"]', 10)
         browser.find_element(By.XPATH, '//*[@id="localAccountCollapse"]').click()
