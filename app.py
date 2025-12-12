@@ -51,14 +51,15 @@ def scrape():
 
     try:
         browser.get("https://www.minvandforsyning.dk/LoginIntermediate")
-        wait_for_element(browser, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[2]/button', 10)
-        browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div[1]/div[2]/button').click()
-        wait_for_element(browser, '//*[@id="localAccountCollapse"]', 10)
-        browser.find_element(By.XPATH, '//*[@id="localAccountCollapse"]').click()
-        browser.find_element(By.XPATH, "//input[@type='text']").send_keys(mvf_username)
+        wait_for_element(browser, '//*[@id="LoginIntermediaryMudPaper"]/div/div[3]/button', 10)
+        browser.find_element(By.XPATH, '//*[@id="LoginIntermediaryMudPaper"]/div/div[3]/button').click()
+        wait_for_element(browser, '//*[@id="signInName"]', 10)
+        sleep(2)
+        browser.find_element(By.XPATH, '//*[@id="signInName"]').send_keys(mvf_username)
         browser.find_element(By.XPATH, "//input[@type='password']").send_keys(mvf_password)
         browser.find_element(By.XPATH, '//*[@id="next"]').click()
         wait_for_element(browser, '//span[2]/b[2]', 60)
+
         _total = float(browser.find_element(By.XPATH, '//span[2]/b[2]').text.replace(',','.'))
         _meter_id = int(browser.find_element(By.XPATH, '//b').text)
         _date = datetime.strftime(
