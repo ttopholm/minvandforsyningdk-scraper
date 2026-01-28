@@ -1,4 +1,8 @@
 # Minvandforsyning.dk til MQTT
+
+[![Tests](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/tests.yml)
+[![Docker](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/main.yml/badge.svg)](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/main.yml)
+
 This repo contains a docker image for minvandforsyning.dk, it will fetch the total m3 of water used.
 
 # Prerequisites
@@ -49,6 +53,52 @@ docker-compose up -d
 | total     | the total of used water in m3 |
 | meter_id     | The number of your meter | 
 | timestamp      | Time for last reading of the meter, provided by minvandforsyning.dk|
+
+# Development
+
+## Running Tests
+
+This project includes a comprehensive suite of unit tests to ensure code quality and reliability.
+
+### Install Development Dependencies
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Run Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run tests with verbose output
+pytest -v
+
+# Run tests with coverage report
+pytest --cov=app --cov-report=term-missing
+
+# Run specific test file
+pytest tests/test_app.py
+
+# Run specific test class
+pytest tests/test_app.py::TestWaitForElement
+
+# Run specific test
+pytest tests/test_app.py::TestWaitForElement::test_wait_for_element_success
+```
+
+### Test Coverage
+
+The test suite currently covers:
+- ✅ `wait_for_element` function with timeout handling
+- ✅ `scrape` function with various scenarios (success, MQTT errors, general exceptions)
+- ✅ Data parsing (total, meter_id, timestamp)
+- ✅ MQTT message structure validation
+- ✅ Configuration and environment variable handling
+- ✅ Browser options setup
+
+Current test coverage: **93.85%**
 
 # Home assistant
 If you want it in Home Assistant as a sensor use the follow MQTT Image code:
