@@ -1,4 +1,8 @@
 # Minvandforsyning.dk til MQTT
+
+[![Tests](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/tests.yml)
+[![Docker](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/main.yml/badge.svg)](https://github.com/ttopholm/minvandforsyningdk-scraper/actions/workflows/main.yml)
+
 This repo contains a docker image for minvandforsyning.dk, it will fetch the total m3 of water used.
 
 # Prerequisites
