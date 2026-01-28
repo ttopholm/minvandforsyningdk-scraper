@@ -15,6 +15,3 @@ typing_extensions==4.11.0
 urllib3==2.6.0
 wsproto==1.2.0
 environs==11.0.0
-pytest==8.0.0
-pytest-cov==4.1.0
-pytest-mock==3.12.0

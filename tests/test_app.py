@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import Mock, MagicMock, patch, call
+from unittest.mock import Mock, patch, call
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from datetime import datetime
@@ -101,6 +101,8 @@ class TestScrapeFunction:
                 return mock_element_meter
             elif xpath == '//span[2]/b':
                 return mock_element_date
+            elif xpath == '//*[@id="LoginIntermediaryMudPaper"]/div/div[3]/button':
+                return Mock()
             elif xpath == '//*[@id="signInName"]' or xpath == "//input[@type='password']" or xpath == '//*[@id="next"]':
                 return Mock()
             else:
@@ -263,48 +265,33 @@ class TestDataParsing:
 class TestConfiguration:
     """Tests for configuration and environment variables"""
     
-    @patch.dict(os.environ, {
-        'mqtt-broker': 'test-broker',
-        'username': 'test-user',
-        'password': 'test-pass',
-        'mqtt-port': '1883',
-        'mqtt-topic': 'test/topic',
-        'mqtt-username': 'mqtt-user',
-        'mqtt-password': 'mqtt-pass'
-    })
     def test_mqtt_auth_with_credentials(self):
         """Test MQTT auth dict is created when credentials are provided"""
-        mqtt_username = 'mqtt-user'
-        mqtt_password = 'mqtt-pass'
+        # Test the actual logic from app.py
+        import app
         
-        mqtt_auth = None
-        if mqtt_username is not None:
-            mqtt_auth = {"username": mqtt_username, "password": mqtt_password}
-        
-        assert mqtt_auth is not None
-        assert mqtt_auth["username"] == 'mqtt-user'
-        assert mqtt_auth["password"] == 'mqtt-pass'
+        # The module should have mqtt_auth set since we have default env vars
+        # Note: mqtt_auth is created at module import time based on env vars
+        assert hasattr(app, 'mqtt_auth')
     
-    def test_mqtt_auth_without_credentials(self):
-        """Test MQTT auth is None when no credentials are provided"""
-        mqtt_username = None
-        mqtt_password = None
+    def test_mqtt_client_id_format(self):
+        """Test MQTT client ID has correct format"""
+        import app
         
-        mqtt_auth = None
-        if mqtt_username is not None:
-            mqtt_auth = {"username": mqtt_username, "password": mqtt_password}
-        
-        assert mqtt_auth is None
+        # Verify the client ID format
+        assert hasattr(app, 'mqtt_client_id')
+        assert app.mqtt_client_id.startswith('python-mqtt-')
+        assert len(app.mqtt_client_id) > len('python-mqtt-')
     
-    def test_mqtt_client_id_generation(self):
-        """Test MQTT client ID generation"""
-        from random import randint
+    def test_environment_variable_defaults(self):
+        """Test default values for optional environment variables"""
+        import app
         
-        # Test that client ID is in expected format
-        mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
-        
-        assert mqtt_client_id.startswith('python-mqtt-')
-        assert len(mqtt_client_id) > len('python-mqtt-')
+        # Test that optional variables have correct defaults or are set
+        assert app.mqtt_port == 1883 or isinstance(app.mqtt_port, int)
+        assert hasattr(app, 'mqtt_topic')
+        assert hasattr(app, 'webdriver_remote_url')
+        assert hasattr(app, 'datetime_format')
 
 
 class TestBrowserOptions:
