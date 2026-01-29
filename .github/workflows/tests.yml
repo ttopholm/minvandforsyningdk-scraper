@@ -29,13 +29,13 @@ jobs:
         pip install -r requirements.txt
         pip install -r requirements-dev.txt
     
-    - name: Run tests with pytest
+    - name: Run unit tests with pytest
       env:
         mqtt-broker: test-broker
         username: test-user
         password: test-pass
       run: |
-        pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=xml
+        pytest tests/ -v -m "not integration" --cov=app --cov-report=term-missing --cov-report=xml
     
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
@@ -45,3 +45,58 @@ jobs:
         flags: unittests
         name: codecov-umbrella
         fail_ci_if_error: false
+
+  integration-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      selenium:
+        image: selenium/standalone-chrome:latest
+        options: --shm-size=2g
+        ports:
+          - 4444:4444
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Start Mosquitto MQTT broker
+      run: |
+        docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+    
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
+    
+    - name: Wait for services to be ready
+      run: |
+        echo "Waiting for Selenium..."
+        timeout 60 bash -c 'until curl -s http://localhost:4444/status | grep -q "ready"; do sleep 2; done'
+        echo "Selenium is ready!"
+        echo "Waiting for MQTT broker..."
+        timeout 30 bash -c 'until nc -z localhost 1883; do sleep 2; done'
+        echo "MQTT broker is ready!"
+    
+    - name: Run integration tests
+      env:
+        mqtt-broker: localhost
+        mqtt-port: "1883"
+        username: test-user
+        password: test-pass
+        webdriver-remote-url: http://localhost:4444
+      run: |
+        pytest tests/ -v -m "integration" --tb=long
+    
+    - name: Stop Mosquitto
+      if: always()
+      run: |
+        docker stop mosquitto || true
+        docker rm mosquitto || true
