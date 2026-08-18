@@ -22,6 +22,9 @@ os.environ.setdefault('username', 'test-user')
 os.environ.setdefault('password', 'test-pass')
 
 
+CI = os.environ.get('CI') == 'true'
+
+
 def is_browser_available():
     """Check if a playwright browser is installed."""
     try:
@@ -50,12 +53,14 @@ def is_mqtt_available():
 
 
 # Skip markers for integration tests
+# In CI the checks are skipped and the tests run regardless: a missing browser
+# or broker has to fail there, a silent skip looks like a pass.
 requires_browser = pytest.mark.skipif(
-    not is_browser_available(),
+    not CI and not is_browser_available(),
     reason="No playwright browser is installed"
 )
 requires_mqtt = pytest.mark.skipif(
-    not is_mqtt_available(),
+    not CI and not is_mqtt_available(),
     reason="MQTT broker is not available"
 )
 

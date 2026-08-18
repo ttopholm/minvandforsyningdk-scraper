@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -48,6 +53,8 @@ jobs:
 
   integration-test:
     runs-on: ubuntu-latest
+    # the job takes about 4 minutes, so this only catches something being stuck
+    timeout-minutes: 20
     permissions:
       contents: read
 
