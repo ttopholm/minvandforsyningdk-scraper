@@ -37,6 +37,59 @@ docker-compose up -d
 | mqtt-topic   | The topic where  data is published to | | minvandforsyningdk/total |
 | webdriver-remote-url   | The url for the selenium server | | http://selenium:4444 |
 | datetime-format   | The format of the time on the webpage | | kl. %H.%M, d. %d.%m.%Y |
+| mqtt-status-topic   | Topic for `online`/`offline`, so you can alert when the scraper stops delivering | |  |
+| login-url   | The page the login starts on | | https://www.minvandforsyning.dk/login/picker |
+
+## Resilience variables
+The scraper retries a failed run instead of waiting a full hour, and a failure
+can never take the process down. These variables tune that behaviour:
+
+| Variable      | Description | Default Value |
+| ----------- | ----------- | ----------- |
+| scrape-interval | Seconds between successful runs | 3600 |
+| retry-interval | Seconds before the next run after a failed one | 300 |
+| max-attempts | Attempts per run before giving up until the next run | 3 |
+| element-timeout | Seconds to wait for an element on the page | 20 |
+| dashboard-timeout | Seconds to wait for the reading to show up after login | 60 |
+| page-load-timeout | Seconds before a hanging page is aborted | 60 |
+| mqtt-retries | Publish attempts before a reading is considered lost | 3 |
+| debug-dir | Directory where html + screenshot is written when a run fails | |
+| log-level | DEBUG, INFO, WARNING or ERROR | INFO |
+
+## When minvandforsyning.dk changes layout or button ids
+Every element is looked up through a list of candidate locators, and the first
+one that matches wins. If the preferred locator stops matching, the fallbacks
+are tried and a warning is logged, so the job keeps running while you look into
+it. Values (total, meter id, timestamp) have a last resort on top of that: they
+are read straight out of the page text with a regular expression.
+
+If all of that fails you can point the scraper at the new markup **without
+waiting for a new image** - just set the matching variable and restart the
+container:
+
+| Variable      | Element |
+| ----------- | ----------- |
+| selector-login-provider | The button that picks the login provider |
+| selector-username | The username field |
+| selector-password | The password field |
+| selector-submit | The login button |
+| selector-total | The total m3 |
+| selector-meter-id | The meter number |
+| selector-timestamp | The time of the reading |
+| pattern-total | Regex used to read the total from the page text |
+| pattern-meter-id | Regex used to read the meter number from the page text |
+
+A value is a list of candidates separated by `||`. Each candidate is an XPath,
+or a CSS selector when prefixed with `css=`:
+
+```
+selector-username=css=#signInName||//input[@type='email']
+```
+
+To find out what the page looks like now, set `debug-dir` (and mount it, see
+the docker-compose file). On every failed run the scraper writes the page html
+and a screenshot to that directory, and the log line tells you which element it
+could not find.
 
 
 # Output format
@@ -92,13 +145,16 @@ pytest tests/test_app.py::TestWaitForElement::test_wait_for_element_success
 
 The test suite currently covers:
 - ✅ `wait_for_element` function with timeout handling
+- ✅ Locator fallbacks and the `selector-*` overrides
+- ✅ Reading values from the page text when the layout changed
 - ✅ `scrape` function with various scenarios (success, MQTT errors, general exceptions)
+- ✅ Retries: a transient failure, a dead selenium, a broker that is down
 - ✅ Data parsing (total, meter_id, timestamp)
 - ✅ MQTT message structure validation
 - ✅ Configuration and environment variable handling
-- ✅ Browser options setup
+- ✅ Browser options setup and the run loop
 
-Current test coverage: **93.85%**
+Current test coverage: **95.36%**
 
 # Home assistant
 If you want it in Home Assistant as a sensor use the follow MQTT Image code:

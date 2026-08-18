@@ -17,8 +17,11 @@ services:
       - mqtt-broker=[mqtt host]
       - username=[username]
       - password=[password]
-      - utility-code=[utility code]
-     depends_on:
+      # optional, see the readme for the full list
+      # - retry-interval=300
+      # - debug-dir=/debug
+    # volumes:
+    #   - ./debug:/debug
+    depends_on:
       selenium:
         condition: service_healthy
-
