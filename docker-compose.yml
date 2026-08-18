@@ -1,24 +1,18 @@
 services:
-  selenium:
-    image: selenium/standalone-chrome:latest
-    shm_size: '2g'
-    restart: always
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://selenium:4444/wd/hub/status"]
-      interval: 20s
-      timeout: 10s
-      retries: 3
-
   minvandforsyning:
     image: ghcr.io/ttopholm/minvandforsyningdk-scraper:latest
     restart: always
+    # chromium needs more than the default 64m of shared memory
+    shm_size: '1g'
     environment:
-      - webdriver-remote-url=http://selenium:4444
       - mqtt-broker=[mqtt host]
       - username=[username]
       - password=[password]
-      - utility-code=[utility code]
-     depends_on:
-      selenium:
-        condition: service_healthy
-
+      # the readings are danish wall clock time
+      - TZ=Europe/Copenhagen
+      # optional, see the readme for the full list
+      # - retry-interval=300
+      # - debug-dir=/debug
+      # - mqtt-discovery=false
+    # volumes:
+    #   - ./debug:/debug

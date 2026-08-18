@@ -6,9 +6,14 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -48,15 +53,10 @@ jobs:
 
   integration-test:
     runs-on: ubuntu-latest
+    # the job takes about 4 minutes, so this only catches something being stuck
+    timeout-minutes: 20
     permissions:
       contents: read
-
-    services:
-      selenium:
-        image: selenium/standalone-chrome:latest
-        options: --shm-size=2g
-        ports:
-          - 4444:4444
 
     steps:
     - uses: actions/checkout@v4
@@ -76,12 +76,14 @@ jobs:
         pip install -r requirements.txt
         pip install -r requirements-dev.txt
     
-    - name: Wait for services to be ready
+    - name: Install the playwright browser
+      # no --with-deps: the apt install it runs hangs now and then, and the
+      # runner image already carries the libraries chromium needs. If one is
+      # ever missing the integration tests fail here instead of skipping.
+      run: playwright install chromium
+    
+    - name: Wait for the MQTT broker to be ready
       run: |
-        echo "Waiting for Selenium..."
-        timeout 60 bash -c 'until curl -s http://localhost:4444/status | grep -q "ready"; do sleep 2; done'
-        echo "Selenium is ready!"
-        echo "Waiting for MQTT broker..."
         timeout 30 bash -c 'until nc -z localhost 1883; do sleep 2; done'
         echo "MQTT broker is ready!"
     
@@ -91,7 +93,6 @@ jobs:
         mqtt-port: "1883"
         username: test-user
         password: test-pass
-        webdriver-remote-url: http://localhost:4444
       run: |
         pytest tests/ -v -m "integration" --tb=long
     
