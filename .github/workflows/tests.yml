@@ -51,13 +51,6 @@ jobs:
     permissions:
       contents: read
 
-    services:
-      selenium:
-        image: selenium/standalone-chrome:latest
-        options: --shm-size=2g
-        ports:
-          - 4444:4444
-
     steps:
     - uses: actions/checkout@v4
     
@@ -76,12 +69,11 @@ jobs:
         pip install -r requirements.txt
         pip install -r requirements-dev.txt
     
-    - name: Wait for services to be ready
+    - name: Install the playwright browser
+      run: playwright install --with-deps chromium
+    
+    - name: Wait for the MQTT broker to be ready
       run: |
-        echo "Waiting for Selenium..."
-        timeout 60 bash -c 'until curl -s http://localhost:4444/status | grep -q "ready"; do sleep 2; done'
-        echo "Selenium is ready!"
-        echo "Waiting for MQTT broker..."
         timeout 30 bash -c 'until nc -z localhost 1883; do sleep 2; done'
         echo "MQTT broker is ready!"
     
@@ -91,7 +83,6 @@ jobs:
         mqtt-port: "1883"
         username: test-user
         password: test-pass
-        webdriver-remote-url: http://localhost:4444
       run: |
         pytest tests/ -v -m "integration" --tb=long
     

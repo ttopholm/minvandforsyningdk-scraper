@@ -1,24 +1,16 @@
 import logging
 import re
 from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from json import dumps
 from random import randint, uniform
 from time import sleep
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from environs import Env
 from paho.mqtt.publish import single as publish
-from selenium import webdriver
-from selenium.common.exceptions import (
-    ElementClickInterceptedException,
-    ElementNotInteractableException,
-    StaleElementReferenceException,
-    TimeoutException,
-    WebDriverException,
-)
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 env = Env()
 env.read_env()
@@ -35,9 +27,13 @@ mqtt_topic = env.str('mqtt-topic', 'minvandforsyningdk/total')
 mqtt_status_topic = env.str('mqtt-status-topic', 'minvandforsyningdk/status')
 mqtt_username = env.str('mqtt-username', None)
 mqtt_password = env.str('mqtt-password', None)
-webdriver_remote_url = env.str('webdriver-remote-url', 'http://selenium:4444')
 datetime_format = env.str('datetime-format', 'kl. %H.%M, d. %d.%m.%Y')
 login_url = env.str('login-url', 'https://www.minvandforsyning.dk/login/picker')
+
+# browser settings
+browser_cdp_url = env.str('browser-cdp-url', None)  # use a remote chrome instead
+browser_executable = env.str('browser-executable', None)  # use another chromium build
+headless = env.bool('headless', True)
 
 # resilience settings
 _run_timer = env.int('scrape-interval', 60 * 60)  # 1 hour between successful runs
@@ -45,9 +41,10 @@ retry_interval = env.int('retry-interval', 5 * 60)  # wait after a failed run
 max_attempts = env.int('max-attempts', 3)  # attempts per run
 element_timeout = env.int('element-timeout', 20)  # seconds to wait for an element
 dashboard_timeout = env.int('dashboard-timeout', 60)  # the reading takes a while to render
-page_load_timeout = env.int('page-load-timeout', 60)  # seconds before get() gives up
+page_load_timeout = env.int('page-load-timeout', 60)  # seconds before goto() gives up
+form_settle_delay = env.int('form-settle-delay', 2)  # let the login form settle
 mqtt_retries = env.int('mqtt-retries', 3)
-debug_dir = env.str('debug-dir', None)  # dump html/screenshot here when a run fails
+debug_dir = env.str('debug-dir', None)  # dump html/screenshot/trace here when a run fails
 log_level = env.str('log-level', 'INFO')
 
 # home assistant mqtt discovery
@@ -70,6 +67,10 @@ logging.basicConfig(
 )
 log = logging.getLogger('minvandforsyning')
 
+if env.str('webdriver-remote-url', None):
+    log.warning("'webdriver-remote-url' is ignored, the scraper runs its own browser "
+                "now. Drop the selenium container, and use 'browser-cdp-url' if you "
+                "really want to drive a remote chrome.")
 
 try:
     reading_timezone = ZoneInfo(timezone_name)
@@ -82,78 +83,67 @@ _announced_meters = set()
 
 
 class ElementNotFoundError(Exception):
-    """Raised when none of the candidate locators for a target matched."""
+    """Raised when none of the candidate selectors for a target matched."""
 
 
-def _parse_locators(spec):
-    """Parse a locator spec string into a list of (By, value) tuples.
+def _parse_selectors(spec):
+    """Split a selector spec into a list of playwright selectors.
 
-    Candidates are separated by '||' and may be prefixed with 'xpath=' or
-    'css=' (xpath is assumed when no prefix is given), e.g.:
-        css=#signInName||xpath=//input[@type='email']
+    Candidates are separated by '||'. Playwright picks the engine itself: a
+    selector starting with '//' is xpath, otherwise it is css, and the
+    'text=', 'role=' and 'id=' prefixes are understood as well, e.g.:
+        #signInName||input[type=email]||role=textbox[name="E-mail"]
     """
-    locators = []
-    for candidate in spec.split('||'):
-        candidate = candidate.strip()
-        if not candidate:
-            continue
-        if candidate.lower().startswith('css='):
-            locators.append((By.CSS_SELECTOR, candidate[4:].strip()))
-        elif candidate.lower().startswith('xpath='):
-            locators.append((By.XPATH, candidate[6:].strip()))
-        else:
-            locators.append((By.XPATH, candidate))
-    return locators
+    return [candidate.strip() for candidate in spec.split('||') if candidate.strip()]
 
 
-# Every element is looked up through an ordered list of candidate locators, so a
+# Every element is looked up through an ordered list of candidate selectors, so a
 # changed id or a moved button does not have to be fatal. The list can be
 # replaced at runtime with the matching 'selector-*' environment variable, which
 # means a layout change can be fixed without rebuilding the image.
 _DEFAULT_SELECTORS = {
     'login-provider': (
-        "/html/body/body/div/div/div[2]/div/div[3]/button/span/p"
-        "||//*[@id='LoginIntermediaryMudPaper']//button[3]"
-        "||//button[contains(., 'Ramb') or contains(., 'lokal')]"
-        "||(//button[.//p])[3]"
+        "xpath=/html/body/body/div/div/div[2]/div/div[3]/button/span/p"
+        "||#LoginIntermediaryMudPaper button >> nth=2"
+        "||role=button[name=/Ramb|lokal/i]"
     ),
     'username': (
-        "//*[@id='signInName']"
-        "||//input[@name='signInName']"
-        "||//input[@type='email']"
-        "||//input[@autocomplete='username']"
+        "#signInName"
+        "||input[name=signInName]"
+        "||input[type=email]"
+        "||input[autocomplete=username]"
     ),
     'password': (
-        "//input[@type='password']"
-        "||//*[@id='password']"
-        "||//input[@name='password']"
+        "input[type=password]"
+        "||#password"
+        "||input[name=password]"
     ),
     'submit': (
-        "//*[@id='next']"
-        "||//button[@type='submit']"
-        "||//input[@type='submit']"
-        "||//button[contains(., 'Log ind') or contains(., 'Sign in')]"
+        "#next"
+        "||button[type=submit]"
+        "||input[type=submit]"
+        "||role=button[name=/log ind|sign in/i]"
     ),
     'total': (
-        "//span[2]/b[2]"
-        "||//*[contains(@class, 'total')]//b[last()]"
+        "xpath=//span[2]/b[2]"
+        "||[class*=total] b >> nth=-1"
     ),
     'meter-id': (
-        "//b"
-        "||//*[contains(@class, 'meter')]//b[1]"
+        "xpath=//b"
+        "||[class*=meter] b"
     ),
     'timestamp': (
-        "//span[2]/b"
-        "||//*[contains(@class, 'total')]//b[1]"
+        "xpath=//span[2]/b"
+        "||[class*=total] b"
     ),
 }
 
 SELECTORS = {
-    name: _parse_locators(env.str(f'selector-{name}', default_spec))
+    name: _parse_selectors(env.str(f'selector-{name}', default_spec))
     for name, default_spec in _DEFAULT_SELECTORS.items()
 }
 
-# Last resort when every locator for a value fails: pull the value straight out
+# Last resort when every selector for a value fails: pull the value straight out
 # of the page text. Layout and ids can change without the text changing.
 total_pattern = env.str('pattern-total', r'([\d.]+,\d+)\s*m(?:³|3)')
 meter_id_pattern = env.str('pattern-meter-id', r'(?:m[åa]ler|meter)[^\d]{0,20}(\d{4,})')
@@ -169,60 +159,44 @@ def _format_to_regex(fmt):
     return ''.join(tokens.get(part, re.escape(part)) for part in parts)
 
 
-def wait_for_element(wd, elm, timeout=10):
-    """Wait for a single XPath to be present. Kept for backwards compatibility."""
-    try:
-        element_present = EC.presence_of_element_located((By.XPATH, elm))
-        WebDriverWait(wd, timeout).until(element_present)
-        return True
-    except TimeoutException:
-        log.warning("Timed out waiting for %s", elm)
+def find(page, target, timeout=None):
+    """Return the first candidate selector for `target` that is on the page.
 
-
-def find_element(browser, target, timeout=None, clickable=False):
-    """Find `target` using its candidate locators, first match wins."""
+    Playwright locators resolve on every use, so the returned locator does not
+    go stale when blazor re-renders the element underneath it.
+    """
     timeout = element_timeout if timeout is None else timeout
-    locators = SELECTORS[target]
-    # Split the budget so one dead locator cannot eat the whole timeout.
-    per_locator = max(2, timeout // max(1, len(locators)))
-    condition = EC.element_to_be_clickable if clickable else EC.presence_of_element_located
+    selectors = SELECTORS[target]
+    # Split the budget so one dead selector cannot eat the whole timeout
+    per_selector = max(2, timeout // max(1, len(selectors))) * 1000
 
-    for index, locator in enumerate(locators):
+    for index, selector in enumerate(selectors):
+        locator = page.locator(selector).first
         try:
-            element = WebDriverWait(browser, per_locator).until(condition(locator))
-            if index > 0:
-                log.warning(
-                    "Fallback locator used for '%s': %s (the preferred locator no "
-                    "longer matches, the site layout has probably changed)",
-                    target, locator,
-                )
-            return element
-        except (TimeoutException, StaleElementReferenceException):
+            locator.wait_for(state='visible', timeout=per_selector)
+        except (PlaywrightTimeoutError, PlaywrightError):
             continue
+        if index > 0:
+            log.warning(
+                "Fallback selector used for '%s': %s (the preferred selector no "
+                "longer matches, the site layout has probably changed)",
+                target, selector,
+            )
+        return locator
+
     raise ElementNotFoundError(
-        f"No locator matched '{target}'. Tried: {locators}. "
+        f"No selector matched '{target}'. Tried: {selectors}. "
         f"Override it with the 'selector-{target}' environment variable."
     )
 
 
-def click(browser, target, timeout=None):
-    """Click `target`, retrying the usual transient click failures."""
-    last_error = None
-    for _ in range(3):
-        try:
-            element = find_element(browser, target, timeout=timeout, clickable=True)
-            element.click()
-            return
-        except (ElementClickInterceptedException, ElementNotInteractableException,
-                StaleElementReferenceException) as error:
-            last_error = error
-            sleep(1)
-    raise last_error
+def click(page, target, timeout=None):
+    """Click `target`. Playwright waits for it to be actionable by itself."""
+    find(page, target, timeout=timeout).click(timeout=element_timeout * 1000)
 
 
-def get_text(browser, target, timeout=None):
-    element = find_element(browser, target, timeout=timeout)
-    return element.text.strip()
+def get_text(page, target, timeout=None):
+    return find(page, target, timeout=timeout).inner_text().strip()
 
 
 def _parse_decimal(value):
@@ -241,11 +215,11 @@ def _localize(timestamp):
     return timestamp.astimezone()
 
 
-def _body_text(browser):
-    """The whole page as text, used when no locator matched any more."""
+def _body_text(page):
+    """The whole page as text, used when no selector matched any more."""
     try:
-        return browser.find_element(By.TAG_NAME, 'body').text
-    except WebDriverException:
+        return page.locator('body').inner_text()
+    except PlaywrightError:
         return ''
 
 
@@ -257,33 +231,30 @@ def _text_fallback(body_text, pattern, target):
     return match.group(1) if match.groups() else match.group(0)
 
 
-def read_values(browser, timeout=None):
+def read_values(page, timeout=None):
     """Read total, meter id and timestamp, falling back to page text."""
     timeout = dashboard_timeout if timeout is None else timeout
 
     try:
-        total = _parse_decimal(get_text(browser, 'total', timeout=timeout))
+        total = _parse_decimal(get_text(page, 'total', timeout=timeout))
     except (ElementNotFoundError, ValueError):
-        body_text = _body_text(browser)
-        raw = _text_fallback(body_text, total_pattern, 'total')
+        raw = _text_fallback(_body_text(page), total_pattern, 'total')
         if raw is None:
             raise
         total = _parse_decimal(raw)
 
     try:
-        meter_id = int(re.sub(r'\D', '', get_text(browser, 'meter-id')))
+        meter_id = int(re.sub(r'\D', '', get_text(page, 'meter-id')))
     except (ElementNotFoundError, ValueError):
-        body_text = _body_text(browser)
-        raw = _text_fallback(body_text, meter_id_pattern, 'meter-id')
+        raw = _text_fallback(_body_text(page), meter_id_pattern, 'meter-id')
         if raw is None:
             raise
         meter_id = int(raw)
 
     try:
-        timestamp = datetime.strptime(get_text(browser, 'timestamp'), datetime_format)
+        timestamp = datetime.strptime(get_text(page, 'timestamp'), datetime_format)
     except (ElementNotFoundError, ValueError):
-        body_text = _body_text(browser)
-        raw = _text_fallback(body_text, _format_to_regex(datetime_format), 'timestamp')
+        raw = _text_fallback(_body_text(page), _format_to_regex(datetime_format), 'timestamp')
         if raw is None:
             raise
         timestamp = datetime.strptime(raw, datetime_format)
@@ -298,9 +269,9 @@ def read_values(browser, timeout=None):
     }
 
 
-def dump_diagnostics(browser, name):
+def dump_diagnostics(page, name):
     """Save the page so a layout change can be inspected afterwards."""
-    if not debug_dir or browser is None:
+    if not debug_dir or page is None:
         return
     from os import makedirs
     from os.path import join
@@ -309,23 +280,23 @@ def dump_diagnostics(browser, name):
         stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         base = join(debug_dir, f'{stamp}-{name}')
         with open(f'{base}.html', 'w', encoding='utf-8') as handle:
-            handle.write(browser.page_source)
-        browser.save_screenshot(f'{base}.png')
+            handle.write(page.content())
+        page.screenshot(path=f'{base}.png', full_page=True)
         log.info("Wrote diagnostics to %s.html / %s.png", base, base)
     except Exception as error:  # diagnostics must never break the run
         log.warning("Could not write diagnostics: %s", error)
 
 
-def create_browser():
-    chrome_options = webdriver.ChromeOptions()
-    chrome_options.add_argument("--incognito")
-    browser = webdriver.Remote(webdriver_remote_url, options=chrome_options)
-    try:
-        browser.set_page_load_timeout(page_load_timeout)
-        browser.set_script_timeout(page_load_timeout)
-    except WebDriverException as error:
-        log.warning("Could not set browser timeouts: %s", error)
-    return browser
+def open_browser(playwright):
+    """Launch our own chromium, or attach to a remote one when configured."""
+    if browser_cdp_url:
+        return playwright.chromium.connect_over_cdp(browser_cdp_url)
+    return playwright.chromium.launch(
+        headless=headless,
+        executable_path=browser_executable,
+        # /dev/shm is small in most containers, and chromium crashes without this
+        args=['--disable-dev-shm-usage'],
+    )
 
 
 def publish_message(topic, message, retries=None, retain=False):
@@ -422,39 +393,77 @@ def publish_discovery(meter_id):
              meter_id, discovery_prefix, meter_id)
 
 
+
+
 def scrape_once():
     """One full attempt: log in, read the meter, publish. Raises on failure."""
-    browser = None
+    with sync_playwright() as playwright:
+        browser = context = page = None
+        tracing = False
+        try:
+            browser = open_browser(playwright)
+            # a fresh context per run is the playwright equivalent of incognito
+            context = browser.new_context()
+            context.set_default_timeout(element_timeout * 1000)
+            if debug_dir:
+                context.tracing.start(screenshots=True, snapshots=True)
+                tracing = True
+            page = context.new_page()
+
+            page.goto(login_url, timeout=page_load_timeout * 1000)
+            click(page, 'login-provider')
+            # the login form is rendered by javascript, so wait for it and give
+            # it a moment to settle before typing into it
+            find(page, 'username')
+            sleep(form_settle_delay)
+            find(page, 'username').fill(mvf_username)
+            find(page, 'password').fill(mvf_password)
+            click(page, 'submit')
+
+            values = read_values(page)
+            log.info("Read meter %s: %s m3 at %s",
+                     values['meter_id'], values['total'], values['timestamp'])
+
+            publish_discovery(values['meter_id'])
+            if not publish_message(mqtt_topic, dumps(values), retain=mqtt_retain):
+                raise RuntimeError("Could not publish the reading to mqtt")
+            publish_status('online')
+            return values
+        except Exception:
+            dump_diagnostics(page, 'failure')
+            tracing = save_trace(context, tracing)
+            raise
+        finally:
+            close_quietly(context, tracing)
+            close_quietly(browser)
+
+
+def save_trace(context, tracing):
+    """Write the playwright trace of a failed run, viewable with trace.playwright.dev."""
+    if not tracing or context is None:
+        return tracing
+    from os.path import join
     try:
-        browser = create_browser()
-        browser.get(login_url)
-        click(browser, 'login-provider')
-        # the login form is rendered by javascript, so wait for it and give it a
-        # moment to settle before typing into it
-        find_element(browser, 'username')
-        sleep(2)
-        find_element(browser, 'username').send_keys(mvf_username)
-        find_element(browser, 'password').send_keys(mvf_password)
-        click(browser, 'submit')
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        path = join(debug_dir, f'{stamp}-failure-trace.zip')
+        context.tracing.stop(path=path)
+        log.info("Wrote a playwright trace to %s, open it on https://trace.playwright.dev",
+                 path)
+    except Exception as error:
+        log.warning("Could not write the trace: %s", error)
+    return False
 
-        values = read_values(browser)
-        log.info("Read meter %s: %s m3 at %s",
-                 values['meter_id'], values['total'], values['timestamp'])
 
-        publish_discovery(values['meter_id'])
-        if not publish_message(mqtt_topic, dumps(values), retain=mqtt_retain):
-            raise RuntimeError("Could not publish the reading to mqtt")
-        publish_status('online')
-        return values
-    except Exception:
-        dump_diagnostics(browser, 'failure')
-        raise
-    finally:
-        if browser is not None:
-            try:
-                browser.quit()
-            except Exception as error:
-                log.warning("Could not close the browser cleanly: %s", error)
+def close_quietly(closeable, tracing=False):
+    """Closing must never be the thing that takes the job down."""
+    if closeable is None:
+        return
+    try:
+        if tracing:
+            closeable.tracing.stop()
+        closeable.close()
+    except Exception as error:
+        log.warning("Could not close the browser cleanly: %s", error)
 
 
 def scrape():
@@ -464,9 +473,11 @@ def scrape():
             return scrape_once()
         except ElementNotFoundError as error:
             log.error("Attempt %s/%s failed: %s", attempt, max_attempts, error)
-        except WebDriverException as error:
-            log.error("Attempt %s/%s failed, browser/selenium problem: %s",
-                      attempt, max_attempts, getattr(error, 'msg', error))
+        except PlaywrightTimeoutError as error:
+            log.error("Attempt %s/%s timed out: %s", attempt, max_attempts, error)
+        except PlaywrightError as error:
+            log.error("Attempt %s/%s failed, browser problem: %s",
+                      attempt, max_attempts, error)
         except Exception as error:
             log.error("Attempt %s/%s failed: %s", attempt, max_attempts, error)
 

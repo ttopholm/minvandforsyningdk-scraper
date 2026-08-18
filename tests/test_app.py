@@ -1,8 +1,8 @@
 # Tests package
 import pytest
 from unittest.mock import Mock, patch
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
-from selenium.webdriver.common.by import By
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from datetime import datetime
 import json
 import sys
@@ -35,214 +35,227 @@ def published(mock_publish):
     return messages
 
 
-class ImmediateWait:
-    """Stand-in for WebDriverWait that evaluates the condition exactly once."""
+class FakeLocator:
+    """A playwright locator that is either on the page or not."""
 
-    def __init__(self, driver, timeout, *args, **kwargs):
-        self.driver = driver
+    def __init__(self, text=None, present=True):
+        self.text = text
+        self.present = present
+        self.clicks = 0
+        self.filled = []
 
-    def until(self, condition):
-        try:
-            result = condition(self.driver)
-        except Exception:
-            raise TimeoutException("not found")
-        if not result:
-            raise TimeoutException("not found")
-        return result
+    @property
+    def first(self):
+        return self
 
+    def wait_for(self, state=None, timeout=None):
+        if not self.present:
+            raise PlaywrightTimeoutError(f"Timeout {timeout}ms exceeded")
 
-def make_driver(elements):
-    """Build a fake driver where `elements` maps a locator value to text."""
-    driver = Mock()
+    def inner_text(self):
+        if not self.present:
+            raise PlaywrightError("element is not attached")
+        return self.text
 
-    def find_element(by, value):
-        if value in elements:
-            element = Mock()
-            element.text = elements[value]
-            # selenium compares is_displayed() to True, so a bare Mock is not enough
-            element.is_displayed.return_value = True
-            element.is_enabled.return_value = True
-            return element
-        raise NoSuchElementException(value)
+    def click(self, timeout=None):
+        self.clicks += 1
 
-    driver.find_element.side_effect = find_element
-    return driver
+    def fill(self, value):
+        self.filled.append(value)
 
 
-class TestWaitForElement:
-    """Tests for the wait_for_element function"""
+class FakePage:
+    """A page where only the given selectors resolve to an element."""
 
-    @patch('app.WebDriverWait')
-    @patch('app.EC')
-    def test_wait_for_element_success(self, mock_ec, mock_wait):
-        """Test wait_for_element returns True when element is found"""
-        from app import wait_for_element
+    def __init__(self, elements=None):
+        self.elements = elements or {}
+        self.locators = {}
+        self.goto_calls = []
+        self.screenshots = []
+        self.goto_error = None
 
-        mock_driver = Mock()
-        mock_wait_instance = Mock()
-        mock_wait.return_value = mock_wait_instance
-        mock_wait_instance.until.return_value = True
+    def locator(self, selector):
+        if selector not in self.locators:
+            self.locators[selector] = FakeLocator(
+                self.elements.get(selector), present=selector in self.elements)
+        return self.locators[selector]
 
-        result = wait_for_element(mock_driver, '//*[@id="test"]', timeout=10)
+    def goto(self, url, timeout=None):
+        self.goto_calls.append(url)
+        if self.goto_error:
+            raise self.goto_error
 
-        assert result is True
-        mock_wait.assert_called_once_with(mock_driver, 10)
-        mock_ec.presence_of_element_located.assert_called_once_with((By.XPATH, '//*[@id="test"]'))
+    def content(self):
+        return '<html>changed layout</html>'
 
-    @patch('app.WebDriverWait')
-    @patch('app.EC')
-    def test_wait_for_element_timeout(self, mock_ec, mock_wait):
-        """Test wait_for_element handles timeout exception"""
-        from app import wait_for_element
-
-        mock_driver = Mock()
-        mock_wait_instance = Mock()
-        mock_wait.return_value = mock_wait_instance
-        mock_wait_instance.until.side_effect = TimeoutException("Timeout")
-
-        result = wait_for_element(mock_driver, '//*[@id="test"]', timeout=10)
-
-        assert result is None
-
-    @patch('app.WebDriverWait')
-    @patch('app.EC')
-    def test_wait_for_element_custom_timeout(self, mock_ec, mock_wait):
-        """Test wait_for_element with custom timeout"""
-        from app import wait_for_element
-
-        mock_driver = Mock()
-        mock_wait_instance = Mock()
-        mock_wait.return_value = mock_wait_instance
-        mock_wait_instance.until.return_value = True
-
-        wait_for_element(mock_driver, '//*[@id="test"]', timeout=30)
-
-        mock_wait.assert_called_once_with(mock_driver, 30)
+    def screenshot(self, path=None, full_page=False):
+        self.screenshots.append(path)
+        with open(path, 'w') as handle:
+            handle.write('png')
 
 
-class TestLocatorParsing:
-    """Tests for the configurable locator specs"""
+class FakeTracing:
+    def __init__(self):
+        self.started = False
+        self.stopped_to = None
 
-    def test_defaults_to_xpath(self):
-        from app import _parse_locators
+    def start(self, **kwargs):
+        self.started = True
 
-        assert _parse_locators("//*[@id='a']") == [(By.XPATH, "//*[@id='a']")]
+    def stop(self, path=None):
+        self.stopped_to = path
 
-    def test_multiple_candidates_and_prefixes(self):
-        from app import _parse_locators
 
-        locators = _parse_locators("css=#a|| xpath=//b ||//c")
+class FakeContext:
+    def __init__(self, page):
+        self.page = page
+        self.tracing = FakeTracing()
+        self.closed = False
+        self.default_timeout = None
 
-        assert locators == [
-            (By.CSS_SELECTOR, '#a'),
-            (By.XPATH, '//b'),
-            (By.XPATH, '//c'),
+    def set_default_timeout(self, timeout):
+        self.default_timeout = timeout
+
+    def new_page(self):
+        return self.page
+
+    def close(self):
+        self.closed = True
+
+
+class FakeBrowser:
+    def __init__(self, page=None):
+        self.context = FakeContext(page if page is not None else FakePage())
+        self.closed = False
+        self.close_error = None
+
+    def new_context(self):
+        return self.context
+
+    def close(self):
+        if self.close_error:
+            raise self.close_error
+        self.closed = True
+
+
+def fake_playwright():
+    """Patch target for app.sync_playwright, which is used as a context manager."""
+    manager = Mock()
+    manager.__enter__ = Mock(return_value=Mock())
+    manager.__exit__ = Mock(return_value=False)
+    return Mock(return_value=manager)
+
+
+def dashboard_page():
+    """A page that looks like the one the scraper expects after login."""
+    return FakePage({
+        'xpath=/html/body/body/div/div/div[2]/div/div[3]/button/span/p': 'Log ind',
+        '#signInName': '',
+        'input[type=password]': '',
+        '#next': 'Log ind',
+        'xpath=//span[2]/b[2]': '234,32',
+        'xpath=//b': '23522852',
+        'xpath=//span[2]/b': 'kl. 18.58, d. 07.10.2024',
+    })
+
+
+class TestSelectorParsing:
+    """Tests for the configurable selector specs"""
+
+    def test_single_selector(self):
+        from app import _parse_selectors
+
+        assert _parse_selectors('#signInName') == ['#signInName']
+
+    def test_multiple_candidates_are_split_and_stripped(self):
+        from app import _parse_selectors
+
+        assert _parse_selectors('#a|| input[type=email] ||xpath=//c') == [
+            '#a', 'input[type=email]', 'xpath=//c',
         ]
 
     def test_empty_candidates_are_ignored(self):
-        from app import _parse_locators
+        from app import _parse_selectors
 
-        assert _parse_locators("//a||||") == [(By.XPATH, '//a')]
+        assert _parse_selectors('#a||||') == ['#a']
 
     def test_every_target_has_a_fallback(self):
         import app
 
-        for target, locators in app.SELECTORS.items():
-            assert len(locators) >= 2, f"{target} has no fallback locator"
+        for target, selectors in app.SELECTORS.items():
+            assert len(selectors) >= 2, f"{target} has no fallback selector"
 
-    def test_selector_can_be_overridden_by_environment(self):
+    def test_selectors_come_from_the_defaults(self):
         import app
 
-        assert app._DEFAULT_SELECTORS['username'].startswith("//*[@id='signInName']")
-        assert app.SELECTORS['username'] == app._parse_locators(
-            app._DEFAULT_SELECTORS['username']
-        )
+        assert app.SELECTORS['username'] == app._parse_selectors(
+            app._DEFAULT_SELECTORS['username'])
 
 
-class TestFindElement:
-    """Tests for the locator fallback logic"""
+class TestFind:
+    """Tests for the selector fallback logic"""
 
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_uses_first_matching_locator(self):
+    def test_uses_the_first_matching_selector(self):
         import app
 
-        driver = make_driver({"//*[@id='signInName']": 'first'})
+        page = FakePage({'#signInName': 'first'})
 
-        assert app.find_element(driver, 'username').text == 'first'
+        assert app.find(page, 'username').inner_text() == 'first'
 
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_falls_back_when_the_id_changed(self):
         import app
 
         # The primary id is gone, as if the site changed its markup
-        driver = make_driver({"//input[@type='email']": 'fallback'})
+        page = FakePage({'input[type=email]': 'fallback'})
 
-        assert app.find_element(driver, 'username').text == 'fallback'
+        assert app.find(page, 'username').inner_text() == 'fallback'
 
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_raises_when_nothing_matches(self):
         import app
 
-        driver = make_driver({})
-
         with pytest.raises(app.ElementNotFoundError) as error:
-            app.find_element(driver, 'username')
+            app.find(FakePage(), 'username')
 
         # The error tells the user how to fix it without a code change
         assert 'selector-username' in str(error.value)
+        assert '#signInName' in str(error.value)
+
+    def test_a_broken_selector_does_not_eat_the_whole_timeout(self):
+        import app
+
+        page = FakePage({'input[type=email]': 'fallback'})
+        app.find(page, 'username', timeout=20)
+
+        # 4 candidates share the 20 second budget
+        waited = page.locators['#signInName']
+        assert waited.present is False
 
 
 class TestClick:
     """Tests for the click helper"""
 
-    @patch('app.sleep')
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_click_success(self, mock_sleep):
+    def test_click_uses_the_located_element(self):
         import app
 
-        driver = make_driver({"//*[@id='next']": 'submit'})
-        app.click(driver, 'submit')
+        page = FakePage({'#next': 'Log ind'})
+        app.click(page, 'submit')
 
-    @patch('app.sleep')
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_click_retries_intercepted_clicks(self, mock_sleep):
+        assert page.locators['#next'].clicks == 1
+
+    def test_click_raises_when_the_button_is_gone(self):
         import app
-        from selenium.common.exceptions import ElementClickInterceptedException
 
-        element = Mock()
-        element.text = 'submit'
-        element.is_displayed.return_value = True
-        element.is_enabled.return_value = True
-        element.click.side_effect = [ElementClickInterceptedException("busy"), None]
-
-        driver = Mock()
-        driver.find_element.side_effect = lambda by, value: (
-            element if value == "//*[@id='next']" else _raise(NoSuchElementException(value))
-        )
-
-        app.click(driver, 'submit')
-
-        assert element.click.call_count == 2
-
-
-def _raise(error):
-    raise error
+        with pytest.raises(app.ElementNotFoundError):
+            app.click(FakePage(), 'submit')
 
 
 class TestReadValues:
     """Tests for reading the values off the page"""
 
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_reads_values_from_elements(self):
         import app
 
-        driver = make_driver({
-            '//span[2]/b[2]': '234,32',
-            '//b': '23522852',
-            '//span[2]/b': 'kl. 18.58, d. 07.10.2024',
-        })
-
-        values = app.read_values(driver)
+        values = app.read_values(dashboard_page())
 
         assert values == {
             'total': 234.32,
@@ -251,17 +264,16 @@ class TestReadValues:
             'timestamp_iso': '2024-10-07T18:58:00+02:00',
         }
 
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_falls_back_to_page_text_when_the_layout_changed(self):
         import app
 
-        # None of the locators match any more, but the text is still on the page
-        driver = make_driver({
+        # None of the selectors match any more, but the text is still on the page
+        page = FakePage({
             'body': 'Måler nr. 23522852\nForbrug i alt 1.234,50 m³\n'
                     'Aflæst kl. 18.58, d. 07.10.2024',
         })
 
-        values = app.read_values(driver)
+        values = app.read_values(page)
 
         assert values['total'] == 1234.50
         assert values['meter_id'] == 23522852
@@ -270,19 +282,13 @@ class TestReadValues:
     def test_body_text_is_empty_when_the_page_is_gone(self):
         import app
 
-        driver = Mock()
-        driver.find_element.side_effect = WebDriverException("no such window")
+        assert app._body_text(FakePage()) == ''
 
-        assert app._body_text(driver) == ''
-
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_raises_when_the_value_is_nowhere(self):
         import app
 
-        driver = make_driver({'body': 'Ingen data'})
-
         with pytest.raises(app.ElementNotFoundError):
-            app.read_values(driver)
+            app.read_values(FakePage({'body': 'Ingen data'}))
 
 
 class TestPublishMessage:
@@ -323,179 +329,6 @@ class TestPublishMessage:
 
         assert app.publish_message('topic', 'payload') is True
         assert mock_publish.call_count == 2
-
-
-class TestScrapeFunction:
-    """Tests for the scrape function"""
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_scrape_success(self, mock_webdriver, mock_sleep, mock_publish):
-        """Test successful scraping and MQTT publishing"""
-        import app
-
-        mock_browser = make_driver({
-            "/html/body/body/div/div/div[2]/div/div[3]/button/span/p": 'login',
-            "//*[@id='signInName']": 'user',
-            "//input[@type='password']": 'pass',
-            "//*[@id='next']": 'next',
-            '//span[2]/b[2]': '234,32',
-            '//b': '23522852',
-            '//span[2]/b': 'kl. 18.58, d. 07.10.2024',
-        })
-        mock_webdriver.Remote.return_value = mock_browser
-
-        values = app.scrape()
-
-        mock_webdriver.Remote.assert_called_once()
-        mock_browser.quit.assert_called_once()
-        mock_browser.get.assert_called_once_with(app.login_url)
-
-        messages = published(mock_publish)
-        assert len(messages[app.mqtt_topic]) == 1
-        parsed_msg = json.loads(messages[app.mqtt_topic][0])
-        assert parsed_msg['total'] == 234.32
-        assert parsed_msg['meter_id'] == 23522852
-        assert parsed_msg['timestamp'] == '2024-10-07 18:58:00'
-        assert parsed_msg['timestamp_iso'] == '2024-10-07T18:58:00+02:00'
-        assert values['total'] == 234.32
-
-        # the entities are announced to home assistant before the reading
-        assert mock_publish.call_args_list[0][0][0].startswith('homeassistant/sensor/')
-        assert messages[app.mqtt_status_topic] == ['online']
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_scrape_mqtt_connection_error(self, mock_webdriver, mock_sleep, mock_publish):
-        """Test scrape handles MQTT connection errors without crashing"""
-        import app
-
-        mock_browser = make_driver({
-            "/html/body/body/div/div/div[2]/div/div[3]/button/span/p": 'login',
-            "//*[@id='signInName']": 'user',
-            "//input[@type='password']": 'pass',
-            "//*[@id='next']": 'next',
-            '//span[2]/b[2]': '234,32',
-            '//b': '23522852',
-            '//span[2]/b': 'kl. 18.58, d. 07.10.2024',
-        })
-        mock_webdriver.Remote.return_value = mock_browser
-        mock_publish.side_effect = ConnectionRefusedError("Connection refused")
-
-        assert app.scrape() is None
-
-        # every attempt closed its browser
-        assert mock_browser.quit.call_count == app.max_attempts
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    def test_scrape_general_exception(self, mock_webdriver, mock_sleep, mock_publish):
-        """Test scrape survives an exception and retries"""
-        import app
-
-        mock_browser = Mock()
-        mock_webdriver.Remote.return_value = mock_browser
-        mock_browser.get.side_effect = Exception("Test exception")
-
-        assert app.scrape() is None
-
-        assert mock_browser.get.call_count == app.max_attempts
-        assert mock_browser.quit.call_count == app.max_attempts
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    def test_scrape_survives_a_dead_selenium(self, mock_webdriver, mock_sleep, mock_publish):
-        """A selenium server that is down must not kill the job"""
-        import app
-
-        mock_webdriver.Remote.side_effect = WebDriverException("connection refused")
-
-        assert app.scrape() is None
-        assert mock_webdriver.Remote.call_count == app.max_attempts
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    @patch('app.WebDriverWait', ImmediateWait)
-    def test_scrape_recovers_on_the_second_attempt(self, mock_webdriver, mock_sleep, mock_publish):
-        """A transient failure is retried within the same run"""
-        import app
-
-        good_browser = make_driver({
-            "/html/body/body/div/div/div[2]/div/div[3]/button/span/p": 'login',
-            "//*[@id='signInName']": 'user',
-            "//input[@type='password']": 'pass',
-            "//*[@id='next']": 'next',
-            '//span[2]/b[2]': '234,32',
-            '//b': '23522852',
-            '//span[2]/b': 'kl. 18.58, d. 07.10.2024',
-        })
-        broken_browser = Mock()
-        broken_browser.get.side_effect = WebDriverException("timeout")
-        mock_webdriver.Remote.side_effect = [broken_browser, good_browser]
-
-        values = app.scrape()
-
-        assert values['total'] == 234.32
-        assert len(published(mock_publish)[app.mqtt_topic]) == 1
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    def test_scrape_browser_navigation(self, mock_webdriver, mock_sleep, mock_publish):
-        """Test scrape navigates to the configured login URL"""
-        import app
-
-        mock_browser = Mock()
-        mock_webdriver.Remote.return_value = mock_browser
-        mock_browser.get.side_effect = Exception("Stop here")
-
-        app.scrape()
-
-        mock_browser.get.assert_called_with("https://www.minvandforsyning.dk/login/picker")
-
-    @patch('app.publish')
-    @patch('app.sleep')
-    @patch('app.webdriver')
-    def test_browser_quit_error_is_not_fatal(self, mock_webdriver, mock_sleep, mock_publish):
-        """A browser that cannot be closed must not take the job down"""
-        import app
-
-        mock_browser = Mock()
-        mock_browser.get.side_effect = Exception("Stop here")
-        mock_browser.quit.side_effect = WebDriverException("session already gone")
-        mock_webdriver.Remote.return_value = mock_browser
-
-        assert app.scrape() is None
-
-
-class TestStatusTopic:
-    """Tests for the optional status topic"""
-
-    @patch('app.publish_message')
-    def test_status_is_not_published_without_a_topic(self, mock_publish_message):
-        import app
-
-        with patch.object(app, 'mqtt_status_topic', None):
-            app.publish_status('offline')
-
-        mock_publish_message.assert_not_called()
-
-    @patch('app.publish_message')
-    def test_status_is_published_when_configured(self, mock_publish_message):
-        import app
-
-        with patch.object(app, 'mqtt_status_topic', 'water/status'):
-            app.publish_status('offline')
-
-        mock_publish_message.assert_called_once_with(
-            'water/status', 'offline', retries=1, retain=True)
 
 
 class TestDiscoveryConfig:
@@ -611,41 +444,247 @@ class TestPublishDiscovery:
         assert 23522852 not in app._announced_meters
 
 
+class TestScrapeFunction:
+    """Tests for the scrape function"""
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_success(self, mock_sleep, mock_publish):
+        """Test successful scraping and MQTT publishing"""
+        import app
+
+        page = dashboard_page()
+        browser = FakeBrowser(page)
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=browser):
+            values = app.scrape()
+
+        assert page.goto_calls == [app.login_url]
+        # the credentials went into the form
+        assert page.locators['#signInName'].filled == [app.mvf_username]
+        assert page.locators['input[type=password]'].filled == [app.mvf_password]
+        assert page.locators['#next'].clicks == 1
+        assert browser.closed and browser.context.closed
+
+        messages = published(mock_publish)
+        parsed_msg = json.loads(messages[app.mqtt_topic][0])
+        assert parsed_msg['total'] == 234.32
+        assert parsed_msg['meter_id'] == 23522852
+        assert parsed_msg['timestamp_iso'] == '2024-10-07T18:58:00+02:00'
+        assert values['total'] == 234.32
+
+        # the entities are announced to home assistant before the reading
+        assert mock_publish.call_args_list[0][0][0].startswith('homeassistant/sensor/')
+        assert messages[app.mqtt_status_topic] == ['online']
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_mqtt_connection_error(self, mock_sleep, mock_publish):
+        """Test scrape handles MQTT connection errors without crashing"""
+        import app
+
+        browsers = [FakeBrowser(dashboard_page()) for _ in range(app.max_attempts)]
+        mock_publish.side_effect = ConnectionRefusedError("Connection refused")
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', side_effect=browsers):
+            assert app.scrape() is None
+
+        # every attempt closed its browser
+        assert all(browser.closed for browser in browsers)
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_general_exception(self, mock_sleep, mock_publish):
+        """Test scrape survives an exception and retries"""
+        import app
+
+        page = FakePage()
+        page.goto_error = Exception("Test exception")
+        browser = FakeBrowser(page)
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=browser):
+            assert app.scrape() is None
+
+        assert len(page.goto_calls) == app.max_attempts
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_survives_a_browser_that_will_not_start(self, mock_sleep, mock_publish):
+        """A browser that cannot launch must not kill the job"""
+        import app
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser',
+                      side_effect=PlaywrightError("browser closed")) as mock_open:
+            assert app.scrape() is None
+
+        assert mock_open.call_count == app.max_attempts
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_survives_a_timeout(self, mock_sleep, mock_publish):
+        """A page that never loads must not kill the job"""
+        import app
+
+        page = FakePage()
+        page.goto_error = PlaywrightTimeoutError("Timeout 60000ms exceeded")
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=FakeBrowser(page)):
+            assert app.scrape() is None
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_scrape_recovers_on_the_second_attempt(self, mock_sleep, mock_publish):
+        """A transient failure is retried within the same run"""
+        import app
+
+        broken = FakePage()
+        broken.goto_error = PlaywrightTimeoutError("Timeout")
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser',
+                      side_effect=[FakeBrowser(broken), FakeBrowser(dashboard_page())]):
+            values = app.scrape()
+
+        assert values['total'] == 234.32
+        assert len(published(mock_publish)[app.mqtt_topic]) == 1
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_browser_close_error_is_not_fatal(self, mock_sleep, mock_publish):
+        """A browser that cannot be closed must not take the job down"""
+        import app
+
+        browser = FakeBrowser(dashboard_page())
+        browser.close_error = PlaywrightError("browser already gone")
+
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=browser):
+            values = app.scrape()
+
+        assert values['total'] == 234.32
+
+
+class TestBrowserOptions:
+    """Tests for how the browser is started"""
+
+    def test_launches_its_own_chromium(self):
+        import app
+
+        playwright = Mock()
+        app.open_browser(playwright)
+
+        playwright.chromium.launch.assert_called_once()
+        kwargs = playwright.chromium.launch.call_args[1]
+        assert kwargs['headless'] is True
+        assert '--disable-dev-shm-usage' in kwargs['args']
+        playwright.chromium.connect_over_cdp.assert_not_called()
+
+    def test_connects_to_a_remote_browser_when_configured(self):
+        import app
+
+        playwright = Mock()
+        with patch.object(app, 'browser_cdp_url', 'http://chrome:9222'):
+            app.open_browser(playwright)
+
+        playwright.chromium.connect_over_cdp.assert_called_once_with('http://chrome:9222')
+        playwright.chromium.launch.assert_not_called()
+
+    def test_a_custom_browser_build_can_be_used(self):
+        import app
+
+        playwright = Mock()
+        with patch.object(app, 'browser_executable', '/usr/bin/chromium'):
+            app.open_browser(playwright)
+
+        assert playwright.chromium.launch.call_args[1]['executable_path'] == '/usr/bin/chromium'
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_each_run_gets_a_fresh_context(self, mock_sleep, mock_publish):
+        """A fresh context is the playwright equivalent of incognito"""
+        import app
+
+        browser = FakeBrowser(dashboard_page())
+        with patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=browser):
+            app.scrape()
+
+        assert browser.context.default_timeout == app.element_timeout * 1000
+        assert browser.context.closed
+
+
 class TestDiagnostics:
     """Tests for the failure diagnostics dump"""
 
-    @patch('app.WebDriverWait', ImmediateWait)
     def test_dump_writes_page_source_and_screenshot(self, tmp_path):
         import app
 
-        browser = Mock()
-        browser.page_source = '<html>changed layout</html>'
-
+        page = FakePage()
         with patch.object(app, 'debug_dir', str(tmp_path)):
-            app.dump_diagnostics(browser, 'failure')
+            app.dump_diagnostics(page, 'failure')
 
         dumps = list(tmp_path.glob('*-failure.html'))
         assert len(dumps) == 1
         assert dumps[0].read_text() == '<html>changed layout</html>'
-        browser.save_screenshot.assert_called_once()
+        assert len(page.screenshots) == 1
 
     def test_dump_is_skipped_without_a_debug_dir(self):
         import app
 
-        browser = Mock()
+        page = FakePage()
         with patch.object(app, 'debug_dir', None):
-            app.dump_diagnostics(browser, 'failure')
+            app.dump_diagnostics(page, 'failure')
 
-        browser.save_screenshot.assert_not_called()
+        assert page.screenshots == []
 
     def test_dump_swallows_its_own_errors(self, tmp_path):
         import app
 
-        browser = Mock()
-        type(browser).page_source = property(lambda self: _raise(WebDriverException("gone")))
+        page = Mock()
+        page.content.side_effect = PlaywrightError("page closed")
 
         with patch.object(app, 'debug_dir', str(tmp_path)):
-            app.dump_diagnostics(browser, 'failure')  # must not raise
+            app.dump_diagnostics(page, 'failure')  # must not raise
+
+    def test_a_trace_is_written_for_a_failed_run(self, tmp_path):
+        import app
+
+        context = FakeContext(FakePage())
+        with patch.object(app, 'debug_dir', str(tmp_path)):
+            assert app.save_trace(context, True) is False
+
+        assert context.tracing.stopped_to.endswith('-failure-trace.zip')
+
+    def test_no_trace_when_tracing_was_never_started(self):
+        import app
+
+        context = FakeContext(FakePage())
+        app.save_trace(context, False)
+
+        assert context.tracing.stopped_to is None
+
+    @patch('app.publish')
+    @patch('app.sleep')
+    def test_tracing_runs_when_a_debug_dir_is_set(self, mock_sleep, mock_publish, tmp_path):
+        import app
+
+        page = FakePage()
+        page.goto_error = PlaywrightError("boom")
+        browser = FakeBrowser(page)
+
+        with patch.object(app, 'debug_dir', str(tmp_path)), \
+                patch.object(app, 'max_attempts', 1), \
+                patch('app.sync_playwright', fake_playwright()), \
+                patch('app.open_browser', return_value=browser):
+            app.scrape()
+
+        assert browser.context.tracing.started
+        assert browser.context.tracing.stopped_to.endswith('-failure-trace.zip')
 
 
 class TestDataParsing:
@@ -669,19 +708,13 @@ class TestDataParsing:
 
     def test_meter_id_parsing(self):
         """Test parsing of meter ID"""
-        test_value = "23522852"
-        parsed = int(test_value)
-        assert parsed == 23522852
+        assert int("23522852") == 23522852
 
     def test_datetime_parsing(self):
         """Test parsing of datetime with custom format"""
-        test_value = "kl. 18.58, d. 07.10.2024"
-        datetime_format = 'kl. %H.%M, d. %d.%m.%Y'
+        parsed_date = datetime.strptime("kl. 18.58, d. 07.10.2024", 'kl. %H.%M, d. %d.%m.%Y')
 
-        parsed_date = datetime.strptime(test_value, datetime_format)
-        formatted_date = datetime.strftime(parsed_date, "%Y-%m-%d %H:%M:%S")
-
-        assert formatted_date == "2024-10-07 18:58:00"
+        assert datetime.strftime(parsed_date, "%Y-%m-%d %H:%M:%S") == "2024-10-07 18:58:00"
 
     def test_localize_uses_danish_time(self):
         from app import _localize
@@ -703,11 +736,10 @@ class TestDataParsing:
         msg_dict = {
             "total": 234.32,
             "meter_id": 23522852,
-            "timestamp": "2024-10-07 18:58:00"
+            "timestamp": "2024-10-07 18:58:00",
         }
 
-        mqtt_msg = json.dumps(msg_dict)
-        parsed = json.loads(mqtt_msg)
+        parsed = json.loads(json.dumps(msg_dict))
 
         assert parsed["total"] == 234.32
         assert parsed["meter_id"] == 23522852
@@ -736,8 +768,13 @@ class TestConfiguration:
 
         assert app.mqtt_port == 1883 or isinstance(app.mqtt_port, int)
         assert hasattr(app, 'mqtt_topic')
-        assert hasattr(app, 'webdriver_remote_url')
         assert hasattr(app, 'datetime_format')
+
+    def test_the_selenium_url_is_gone(self):
+        """The scraper runs its own browser now"""
+        import app
+
+        assert not hasattr(app, 'webdriver_remote_url')
 
     def test_resilience_defaults(self):
         """Test the resilience settings have sane defaults"""
@@ -747,36 +784,7 @@ class TestConfiguration:
         assert app.retry_interval < app._run_timer
         assert app.max_attempts >= 1
         assert app.page_load_timeout > 0
-
-
-class TestBrowserOptions:
-    """Tests for browser configuration"""
-
-    @patch('app.webdriver')
-    def test_chrome_options_incognito(self, mock_webdriver):
-        """Test Chrome browser is configured with incognito mode"""
-        import app
-
-        mock_chrome_options = Mock()
-        mock_webdriver.ChromeOptions.return_value = mock_chrome_options
-
-        app.create_browser()
-
-        mock_webdriver.ChromeOptions.assert_called_once()
-        mock_chrome_options.add_argument.assert_called_once_with("--incognito")
-
-    @patch('app.webdriver')
-    def test_browser_timeouts_are_set(self, mock_webdriver):
-        """Page load timeouts keep a hanging page from stalling the job"""
-        import app
-
-        mock_browser = Mock()
-        mock_webdriver.Remote.return_value = mock_browser
-
-        app.create_browser()
-
-        mock_browser.set_page_load_timeout.assert_called_once_with(app.page_load_timeout)
-        mock_browser.set_script_timeout.assert_called_once_with(app.page_load_timeout)
+        assert app.headless is True
 
 
 class TestMainLoop:

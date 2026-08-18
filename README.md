@@ -5,6 +5,10 @@
 
 This repo contains a docker image for minvandforsyning.dk, it will fetch the total m3 of water used.
 
+It drives a real browser, because the site is a Blazor Server app without a public api. The
+browser (chromium, through [Playwright](https://playwright.dev/python/)) ships inside the
+image, so the scraper is the only container you need.
+
 # Prerequisites
 You need to have a mqtt broker installed, I recommend [Eclipse Mosquitto](https://mosquitto.org), or you can use the mqtt addon for HAOS.
 
@@ -18,12 +22,24 @@ docker run ghcr.io/ttopholm/minvandforsyningdk-scraper:latest
 
 ## Docker compose
 
-To use the docker-compose, you can run it with the following command in the directory where you have your docker-compose.yml file, it will download the scraper and requirements for the scraper (not mqtt broker):
+To use the docker-compose, you can run it with the following command in the directory where you have your docker-compose.yml file (the mqtt broker is not included):
 ```
 docker-compose up -d
 ```
 
 <b>Remember</b> to set the variables in the docker-compose.yml, before you run the command above.
+
+## Upgrading from the selenium version
+The scraper used to need a separate `selenium/standalone-chrome` container. It
+does not any more, the browser is inside the image:
+
+1. Remove the `selenium` service and the `depends_on` block from your
+   docker-compose.yml, and drop the `webdriver-remote-url` variable. It is
+   ignored, and the scraper logs a warning if it is still set.
+2. Add `shm_size: '1g'` to the scraper service. Chromium needs more shared
+   memory than the 64m docker gives a container by default.
+3. If you have the manual Home Assistant sensor in your yaml, see the Home
+   assistant section below before the first run.
 
 ## Environment Variables
 | Variable      | Description | Mandatory | Default Value |
@@ -35,7 +51,6 @@ docker-compose up -d
 | mqtt-username   | The username for the mqtt broker | |  |
 | mqtt-password   | The password for the mqtt broker | |  |
 | mqtt-topic   | The topic where  data is published to | | minvandforsyningdk/total |
-| webdriver-remote-url   | The url for the selenium server | | http://selenium:4444 |
 | datetime-format   | The format of the time on the webpage | | kl. %H.%M, d. %d.%m.%Y |
 | mqtt-status-topic   | Topic for `online`/`offline`, used as availability for the entities | | minvandforsyningdk/status |
 | mqtt-retain   | Retain the reading, so Home Assistant has a value right after a restart | | true |
@@ -44,6 +59,13 @@ docker-compose up -d
 | device-name   | The device name shown in Home Assistant | | Minvandforsyning |
 | timezone   | Timezone the readings are written in | | Europe/Copenhagen |
 | login-url   | The page the login starts on | | https://www.minvandforsyning.dk/login/picker |
+
+## Browser variables
+| Variable      | Description | Default Value |
+| ----------- | ----------- | ----------- |
+| headless | Run the browser without a screen | true |
+| browser-executable | Path to another chromium build, if you do not want the bundled one | |
+| browser-cdp-url | Drive a remote chrome over CDP instead of starting one, e.g. `http://chrome:9222` | |
 
 ## Resilience variables
 The scraper retries a failed run instead of waiting a full hour, and a failure
@@ -55,15 +77,16 @@ can never take the process down. These variables tune that behaviour:
 | retry-interval | Seconds before the next run after a failed one | 300 |
 | max-attempts | Attempts per run before giving up until the next run | 3 |
 | element-timeout | Seconds to wait for an element on the page | 20 |
+| form-settle-delay | Seconds to let the login form settle before typing | 2 |
 | dashboard-timeout | Seconds to wait for the reading to show up after login | 60 |
 | page-load-timeout | Seconds before a hanging page is aborted | 60 |
+| debug-dir | Directory for html, screenshot and a playwright trace of a failed run | |
 | mqtt-retries | Publish attempts before a reading is considered lost | 3 |
-| debug-dir | Directory where html + screenshot is written when a run fails | |
 | log-level | DEBUG, INFO, WARNING or ERROR | INFO |
 
 ## When minvandforsyning.dk changes layout or button ids
-Every element is looked up through a list of candidate locators, and the first
-one that matches wins. If the preferred locator stops matching, the fallbacks
+Every element is looked up through a list of candidate selectors, and the first
+one that matches wins. If the preferred selector stops matching, the fallbacks
 are tried and a warning is logged, so the job keeps running while you look into
 it. Values (total, meter id, timestamp) have a last resort on top of that: they
 are read straight out of the page text with a regular expression.
@@ -84,17 +107,21 @@ container:
 | pattern-total | Regex used to read the total from the page text |
 | pattern-meter-id | Regex used to read the meter number from the page text |
 
-A value is a list of candidates separated by `||`. Each candidate is an XPath,
-or a CSS selector when prefixed with `css=`:
+A value is a list of candidates separated by `||`, and Playwright picks the
+engine itself: CSS by default, XPath when it starts with `//`, and the `text=`,
+`role=` and `id=` prefixes work too. Text and role based selectors survive a
+redesign much better than an id:
 
 ```
-selector-username=css=#signInName||//input[@type='email']
+selector-submit=#next||button[type=submit]||role=button[name=/log ind/i]
 ```
 
 To find out what the page looks like now, set `debug-dir` (and mount it, see
-the docker-compose file). On every failed run the scraper writes the page html
-and a screenshot to that directory, and the log line tells you which element it
-could not find.
+the docker-compose file). On every failed run the scraper writes the page html,
+a screenshot and a [Playwright trace](https://trace.playwright.dev) to that
+directory, and the log line tells you which element it could not find. The
+trace has the DOM at every step, so you can click through the run and see
+exactly where it went wrong.
 
 
 # Output format
@@ -128,6 +155,7 @@ This project includes a comprehensive suite of unit tests to ensure code quality
 
 ```bash
 pip install -r requirements-dev.txt
+playwright install --with-deps chromium
 ```
 
 ### Run Tests
@@ -155,18 +183,18 @@ pytest tests/test_app.py::TestWaitForElement::test_wait_for_element_success
 ### Test Coverage
 
 The test suite currently covers:
-- ✅ `wait_for_element` function with timeout handling
-- ✅ Locator fallbacks and the `selector-*` overrides
+- ✅ Selector fallbacks and the `selector-*` overrides, in a real browser
 - ✅ Reading values from the page text when the layout changed
 - ✅ `scrape` function with various scenarios (success, MQTT errors, general exceptions)
-- ✅ Retries: a transient failure, a dead selenium, a broker that is down
+- ✅ Retries: a transient failure, a browser that will not start, a broker that is down
+- ✅ A full run against a local copy of the site, browser and broker included
 - ✅ Data parsing (total, meter_id, timestamp)
 - ✅ MQTT message structure validation
 - ✅ Configuration and environment variable handling
 - ✅ Home Assistant discovery payloads, against a real broker in CI
 - ✅ Browser options setup and the run loop
 
-Current test coverage: **94.53%**
+Current test coverage: **94.07%**
 
 # Home assistant
 
