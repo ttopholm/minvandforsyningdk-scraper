@@ -17,9 +17,12 @@ services:
       - mqtt-broker=[mqtt host]
       - username=[username]
       - password=[password]
+      # the readings are danish wall clock time
+      - TZ=Europe/Copenhagen
       # optional, see the readme for the full list
       # - retry-interval=300
       # - debug-dir=/debug
+      # - mqtt-discovery=false
     # volumes:
     #   - ./debug:/debug
     depends_on:

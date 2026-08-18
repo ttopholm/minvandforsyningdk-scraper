@@ -17,6 +17,24 @@ os.environ.setdefault('password', 'test-pass')
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 
+@pytest.fixture(autouse=True)
+def reset_announced_meters():
+    """Discovery is only published once per meter, so reset it between tests."""
+    import app
+    app._announced_meters.clear()
+    yield
+    app._announced_meters.clear()
+
+
+def published(mock_publish):
+    """Map topic -> list of payloads from a mocked paho publish."""
+    messages = {}
+    for call_args in mock_publish.call_args_list:
+        topic, payload = call_args[0][0], call_args[0][1]
+        messages.setdefault(topic, []).append(payload)
+    return messages
+
+
 class ImmediateWait:
     """Stand-in for WebDriverWait that evaluates the condition exactly once."""
 
@@ -230,6 +248,7 @@ class TestReadValues:
             'total': 234.32,
             'meter_id': 23522852,
             'timestamp': '2024-10-07 18:58:00',
+            'timestamp_iso': '2024-10-07T18:58:00+02:00',
         }
 
     @patch('app.WebDriverWait', ImmediateWait)
@@ -275,6 +294,15 @@ class TestPublishMessage:
 
         assert app.publish_message('topic', 'payload') is True
         mock_publish.assert_called_once()
+        assert mock_publish.call_args[1]['retain'] is False
+
+    @patch('app.publish')
+    def test_publish_can_retain(self, mock_publish):
+        import app
+
+        app.publish_message('topic', 'payload', retain=True)
+
+        assert mock_publish.call_args[1]['retain'] is True
 
     @patch('app.sleep')
     @patch('app.publish')
@@ -325,12 +353,18 @@ class TestScrapeFunction:
         mock_browser.quit.assert_called_once()
         mock_browser.get.assert_called_once_with(app.login_url)
 
-        mock_publish.assert_called_once()
-        parsed_msg = json.loads(mock_publish.call_args[0][1])
+        messages = published(mock_publish)
+        assert len(messages[app.mqtt_topic]) == 1
+        parsed_msg = json.loads(messages[app.mqtt_topic][0])
         assert parsed_msg['total'] == 234.32
         assert parsed_msg['meter_id'] == 23522852
         assert parsed_msg['timestamp'] == '2024-10-07 18:58:00'
+        assert parsed_msg['timestamp_iso'] == '2024-10-07T18:58:00+02:00'
         assert values['total'] == 234.32
+
+        # the entities are announced to home assistant before the reading
+        assert mock_publish.call_args_list[0][0][0].startswith('homeassistant/sensor/')
+        assert messages[app.mqtt_status_topic] == ['online']
 
     @patch('app.publish')
     @patch('app.sleep')
@@ -409,7 +443,7 @@ class TestScrapeFunction:
         values = app.scrape()
 
         assert values['total'] == 234.32
-        mock_publish.assert_called_once()
+        assert len(published(mock_publish)[app.mqtt_topic]) == 1
 
     @patch('app.publish')
     @patch('app.sleep')
@@ -460,7 +494,121 @@ class TestStatusTopic:
         with patch.object(app, 'mqtt_status_topic', 'water/status'):
             app.publish_status('offline')
 
-        mock_publish_message.assert_called_once_with('water/status', 'offline', retries=1)
+        mock_publish_message.assert_called_once_with(
+            'water/status', 'offline', retries=1, retain=True)
+
+
+class TestDiscoveryConfig:
+    """Tests for the Home Assistant mqtt discovery payloads"""
+
+    def test_one_config_per_entity(self):
+        import app
+
+        configs = dict(app.discovery_config(23522852))
+
+        assert set(configs) == {
+            'homeassistant/sensor/minvandforsyning_23522852/total/config',
+            'homeassistant/sensor/minvandforsyning_23522852/timestamp/config',
+            'homeassistant/sensor/minvandforsyning_23522852/meter_id/config',
+        }
+
+    def test_total_is_a_water_meter_for_the_energy_dashboard(self):
+        import app
+
+        configs = dict(app.discovery_config(23522852))
+        total = configs['homeassistant/sensor/minvandforsyning_23522852/total/config']
+
+        assert total['device_class'] == 'water'
+        assert total['state_class'] == 'total_increasing'
+        assert total['unit_of_measurement'] == 'm³'
+        assert total['value_template'] == '{{ value_json.total }}'
+        assert total['state_topic'] == app.mqtt_topic
+
+    def test_entities_share_one_device_and_have_unique_ids(self):
+        import app
+
+        configs = dict(app.discovery_config(23522852))
+        identifiers = {tuple(c['device']['identifiers']) for c in configs.values()}
+        unique_ids = {c['unique_id'] for c in configs.values()}
+
+        assert identifiers == {('minvandforsyning_23522852',)}
+        assert len(unique_ids) == len(configs)
+
+    def test_availability_follows_the_status_topic(self):
+        import app
+
+        with patch.object(app, 'mqtt_status_topic', 'water/status'):
+            configs = dict(app.discovery_config(23522852))
+
+        for config in configs.values():
+            assert config['availability_topic'] == 'water/status'
+            assert config['payload_available'] == 'online'
+
+    def test_availability_is_left_out_without_a_status_topic(self):
+        import app
+
+        with patch.object(app, 'mqtt_status_topic', None):
+            configs = dict(app.discovery_config(23522852))
+
+        for config in configs.values():
+            assert 'availability_topic' not in config
+
+    def test_payloads_are_json_serialisable(self):
+        import app
+
+        for _, config in app.discovery_config(23522852):
+            json.loads(json.dumps(config))
+
+
+class TestPublishDiscovery:
+    """Tests for announcing the entities"""
+
+    @patch('app.publish')
+    def test_configs_are_published_retained(self, mock_publish):
+        import app
+
+        app.publish_discovery(23522852)
+
+        assert mock_publish.call_count == 3
+        for call_args in mock_publish.call_args_list:
+            assert call_args[1]['retain'] is True
+
+    @patch('app.publish')
+    def test_only_announced_once_per_meter(self, mock_publish):
+        import app
+
+        app.publish_discovery(23522852)
+        app.publish_discovery(23522852)
+
+        assert mock_publish.call_count == 3
+
+    @patch('app.publish')
+    def test_a_new_meter_is_announced_again(self, mock_publish):
+        import app
+
+        app.publish_discovery(23522852)
+        app.publish_discovery(999)
+
+        assert mock_publish.call_count == 6
+
+    @patch('app.publish')
+    def test_can_be_disabled(self, mock_publish):
+        import app
+
+        with patch.object(app, 'mqtt_discovery', False):
+            app.publish_discovery(23522852)
+
+        mock_publish.assert_not_called()
+
+    @patch('app.sleep')
+    @patch('app.publish')
+    def test_a_failed_announce_is_retried_on_the_next_run(self, mock_publish, mock_sleep):
+        import app
+
+        mock_publish.side_effect = ConnectionRefusedError("broker down")
+        app.publish_discovery(23522852)
+
+        assert 23522852 not in app._announced_meters
 
 
 class TestDiagnostics:
@@ -534,6 +682,12 @@ class TestDataParsing:
         formatted_date = datetime.strftime(parsed_date, "%Y-%m-%d %H:%M:%S")
 
         assert formatted_date == "2024-10-07 18:58:00"
+
+    def test_localize_uses_danish_time(self):
+        from app import _localize
+
+        assert _localize(datetime(2024, 7, 7, 18, 58)).isoformat() == '2024-07-07T18:58:00+02:00'
+        assert _localize(datetime(2024, 12, 7, 18, 58)).isoformat() == '2024-12-07T18:58:00+01:00'
 
     def test_format_to_regex_matches_the_same_text(self):
         import re

@@ -1,6 +1,7 @@
 import logging
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from json import dumps
 from random import randint, uniform
 from time import sleep
@@ -31,7 +32,7 @@ mvf_password = env.str('password')
 # optional variables
 mqtt_port = env.int('mqtt-port', 1883)
 mqtt_topic = env.str('mqtt-topic', 'minvandforsyningdk/total')
-mqtt_status_topic = env.str('mqtt-status-topic', None)
+mqtt_status_topic = env.str('mqtt-status-topic', 'minvandforsyningdk/status')
 mqtt_username = env.str('mqtt-username', None)
 mqtt_password = env.str('mqtt-password', None)
 webdriver_remote_url = env.str('webdriver-remote-url', 'http://selenium:4444')
@@ -49,6 +50,14 @@ mqtt_retries = env.int('mqtt-retries', 3)
 debug_dir = env.str('debug-dir', None)  # dump html/screenshot here when a run fails
 log_level = env.str('log-level', 'INFO')
 
+# home assistant mqtt discovery
+mqtt_discovery = env.bool('mqtt-discovery', True)
+discovery_prefix = env.str('mqtt-discovery-prefix', 'homeassistant')
+mqtt_retain = env.bool('mqtt-retain', True)
+device_name = env.str('device-name', 'Minvandforsyning')
+# the site reports danish wall clock time without a timezone
+timezone_name = env.str('timezone', 'Europe/Copenhagen')
+
 mqtt_client_id = f'python-mqtt-{randint(0, 1000)}'
 
 mqtt_auth = None
@@ -60,6 +69,16 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s %(message)s',
 )
 log = logging.getLogger('minvandforsyning')
+
+
+try:
+    reading_timezone = ZoneInfo(timezone_name)
+except (ZoneInfoNotFoundError, ValueError):
+    log.warning("Unknown timezone '%s', falling back to the container timezone",
+                timezone_name)
+    reading_timezone = None
+
+_announced_meters = set()
 
 
 class ElementNotFoundError(Exception):
@@ -215,6 +234,13 @@ def _parse_decimal(value):
     return float(value)
 
 
+def _localize(timestamp):
+    """Attach a timezone to the naive timestamp read off the page."""
+    if reading_timezone is not None:
+        return timestamp.replace(tzinfo=reading_timezone)
+    return timestamp.astimezone()
+
+
 def _body_text(browser):
     """The whole page as text, used when no locator matched any more."""
     try:
@@ -266,6 +292,9 @@ def read_values(browser, timeout=None):
         "total": total,
         "meter_id": meter_id,
         "timestamp": datetime.strftime(timestamp, "%Y-%m-%d %H:%M:%S"),
+        # home assistant needs an unambiguous timestamp, so attach the timezone
+        # the reading was written in
+        "timestamp_iso": _localize(timestamp).isoformat(),
     }
 
 
@@ -299,12 +328,13 @@ def create_browser():
     return browser
 
 
-def publish_message(topic, message, retries=None):
+def publish_message(topic, message, retries=None, retain=False):
     """Publish to MQTT, retrying transient broker/network errors."""
     retries = mqtt_retries if retries is None else retries
     for attempt in range(1, retries + 1):
         try:
-            publish(topic, message, hostname=mqtt_broker, port=mqtt_port, auth=mqtt_auth)
+            publish(topic, message, hostname=mqtt_broker, port=mqtt_port,
+                    auth=mqtt_auth, retain=retain)
             return True
         except (ConnectionRefusedError, OSError) as error:
             log.warning("Can't connect to mqtt server (attempt %s/%s): %s",
@@ -316,7 +346,80 @@ def publish_message(topic, message, retries=None):
 
 def publish_status(status):
     if mqtt_status_topic:
-        publish_message(mqtt_status_topic, status, retries=1)
+        publish_message(mqtt_status_topic, status, retries=1, retain=True)
+
+
+def discovery_config(meter_id):
+    """Home Assistant mqtt discovery config, one entry per entity.
+
+    See https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery. The
+    payloads are retained so the entities survive a Home Assistant restart.
+    """
+    node_id = f'minvandforsyning_{meter_id}'
+    device = {
+        "identifiers": [node_id],
+        "name": device_name,
+        "manufacturer": "minvandforsyning.dk",
+        "model": "Water meter",
+        "configuration_url": "https://www.minvandforsyning.dk",
+    }
+    origin = {
+        "name": "minvandforsyningdk-scraper",
+        "support_url": "https://github.com/ttopholm/minvandforsyningdk-scraper",
+    }
+    shared = {
+        "state_topic": mqtt_topic,
+        "device": device,
+        "origin": origin,
+    }
+    if mqtt_status_topic:
+        shared["availability_topic"] = mqtt_status_topic
+        shared["payload_available"] = "online"
+        shared["payload_not_available"] = "offline"
+
+    entities = {
+        "total": {
+            "name": "Total",
+            "unique_id": f'{node_id}_total',
+            "device_class": "water",
+            "state_class": "total_increasing",
+            "unit_of_measurement": "m³",
+            "value_template": "{{ value_json.total }}",
+            "icon": "mdi:water",
+        },
+        "timestamp": {
+            "name": "Last reading",
+            "unique_id": f'{node_id}_timestamp',
+            "device_class": "timestamp",
+            "value_template": "{{ value_json.timestamp_iso }}",
+            "entity_category": "diagnostic",
+        },
+        "meter_id": {
+            "name": "Meter number",
+            "unique_id": f'{node_id}_meter_id',
+            "value_template": "{{ value_json.meter_id }}",
+            "entity_category": "diagnostic",
+            "icon": "mdi:counter",
+        },
+    }
+
+    return [
+        (f'{discovery_prefix}/sensor/{node_id}/{object_id}/config', {**shared, **config})
+        for object_id, config in entities.items()
+    ]
+
+
+def publish_discovery(meter_id):
+    """Announce the entities to Home Assistant. Only needed once per meter."""
+    if not mqtt_discovery or meter_id in _announced_meters:
+        return
+    for topic, config in discovery_config(meter_id):
+        if not publish_message(topic, dumps(config), retain=True):
+            log.warning("Could not publish the discovery config to %s", topic)
+            return
+    _announced_meters.add(meter_id)
+    log.info("Announced meter %s to Home Assistant on %s/sensor/minvandforsyning_%s/",
+             meter_id, discovery_prefix, meter_id)
 
 
 def scrape_once():
@@ -338,7 +441,8 @@ def scrape_once():
         log.info("Read meter %s: %s m3 at %s",
                  values['meter_id'], values['total'], values['timestamp'])
 
-        if not publish_message(mqtt_topic, dumps(values)):
+        publish_discovery(values['meter_id'])
+        if not publish_message(mqtt_topic, dumps(values), retain=mqtt_retain):
             raise RuntimeError("Could not publish the reading to mqtt")
         publish_status('online')
         return values

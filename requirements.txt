@@ -15,3 +15,4 @@ typing_extensions==4.11.0
 urllib3==2.6.3
 wsproto==1.2.0
 environs==11.0.0
+tzdata==2024.1

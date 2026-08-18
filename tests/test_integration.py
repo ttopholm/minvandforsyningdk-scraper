@@ -8,6 +8,7 @@ import pytest
 import json
 import time
 import os
+from unittest.mock import patch
 
 # Timeout constants
 SUBSCRIPTION_WAIT = 0.5  # Time to wait for MQTT subscription to be established
@@ -222,6 +223,81 @@ class TestMQTTIntegration:
         assert parsed['total'] == 234.32
         assert parsed['meter_id'] == 23522852
         assert parsed['timestamp'] == "2024-10-07 18:58:00"
+
+
+@integration
+@requires_mqtt
+class TestDiscoveryIntegration:
+    """Integration tests for the Home Assistant discovery messages."""
+
+    def test_discovery_configs_are_retained_on_the_broker(self, mqtt_client):
+        """A restarted Home Assistant must still find the entities."""
+        import app
+
+        app._announced_meters.clear()
+        with_prefix = 'test/homeassistant'
+        with patch.object(app, 'discovery_prefix', with_prefix), \
+                patch.object(app, 'mqtt_broker', os.environ.get('mqtt-broker', 'localhost')):
+            app.publish_discovery(23522852)
+
+        # a client that connects afterwards still receives the retained configs
+        received = {}
+
+        def on_message(client, userdata, msg):
+            if not msg.payload:  # an empty payload clears a retained message
+                return
+            received[msg.topic] = json.loads(msg.payload.decode())
+
+        mqtt_client.on_message = on_message
+        mqtt_client.subscribe(f'{with_prefix}/sensor/#')
+
+        start = time.time()
+        while len(received) < 3 and (time.time() - start) < MESSAGE_TIMEOUT:
+            time.sleep(POLL_INTERVAL)
+
+        assert len(received) == 3
+        total = received[f'{with_prefix}/sensor/minvandforsyning_23522852/total/config']
+        assert total['device_class'] == 'water'
+        assert total['state_class'] == 'total_increasing'
+        assert total['unique_id'] == 'minvandforsyning_23522852_total'
+
+        # clean up the retained messages so the broker does not keep them
+        for topic in received:
+            mqtt_client.publish(topic, '', retain=True)
+        time.sleep(SUBSCRIPTION_WAIT)
+
+    def test_a_published_reading_matches_the_discovery_templates(self, mqtt_client):
+        """The value_templates must line up with the payload we publish."""
+        import app
+
+        received = []
+
+        def on_message(client, userdata, msg):
+            received.append(json.loads(msg.payload.decode()))
+
+        test_topic = 'test/integration/discovery_reading'
+        mqtt_client.on_message = on_message
+        mqtt_client.subscribe(test_topic)
+        time.sleep(SUBSCRIPTION_WAIT)
+
+        payload = {
+            "total": 234.32,
+            "meter_id": 23522852,
+            "timestamp": "2024-10-07 18:58:00",
+            "timestamp_iso": "2024-10-07T18:58:00+02:00",
+        }
+        with patch.object(app, 'mqtt_broker', os.environ.get('mqtt-broker', 'localhost')):
+            assert app.publish_message(test_topic, json.dumps(payload)) is True
+
+        start = time.time()
+        while not received and (time.time() - start) < MESSAGE_TIMEOUT:
+            time.sleep(POLL_INTERVAL)
+
+        assert len(received) == 1
+        # every value_template in the discovery config reads a key we publish
+        for _, config in app.discovery_config(23522852):
+            key = config['value_template'].strip('{} ').split('.')[-1].strip()
+            assert key in received[0], f"{key} is missing from the published reading"
 
 
 @integration

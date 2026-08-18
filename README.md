@@ -37,7 +37,12 @@ docker-compose up -d
 | mqtt-topic   | The topic where  data is published to | | minvandforsyningdk/total |
 | webdriver-remote-url   | The url for the selenium server | | http://selenium:4444 |
 | datetime-format   | The format of the time on the webpage | | kl. %H.%M, d. %d.%m.%Y |
-| mqtt-status-topic   | Topic for `online`/`offline`, so you can alert when the scraper stops delivering | |  |
+| mqtt-status-topic   | Topic for `online`/`offline`, used as availability for the entities | | minvandforsyningdk/status |
+| mqtt-retain   | Retain the reading, so Home Assistant has a value right after a restart | | true |
+| mqtt-discovery   | Announce the sensors to Home Assistant automatically | | true |
+| mqtt-discovery-prefix   | Discovery prefix, must match the one in Home Assistant | | homeassistant |
+| device-name   | The device name shown in Home Assistant | | Minvandforsyning |
+| timezone   | Timezone the readings are written in | | Europe/Copenhagen |
 | login-url   | The page the login starts on | | https://www.minvandforsyning.dk/login/picker |
 
 ## Resilience variables
@@ -96,8 +101,9 @@ could not find.
 ```
 {
     "total":234.32,
-    "meter_id":"23522852",
-    "timestamp":"2024-10-07 18:58:00"
+    "meter_id":23522852,
+    "timestamp":"2024-10-07 18:58:00",
+    "timestamp_iso":"2024-10-07T18:58:00+02:00"
 }
 ```
 ## Output variables
@@ -106,6 +112,11 @@ could not find.
 | total     | the total of used water in m3 |
 | meter_id     | The number of your meter | 
 | timestamp      | Time for last reading of the meter, provided by minvandforsyning.dk|
+| timestamp_iso      | The same time with a timezone, used by the Home Assistant sensor |
+
+The site reports danish wall clock time without a timezone. `timestamp_iso` adds
+the timezone from the `timezone` variable, so set it if your meter is not read
+in danish time.
 
 # Development
 
@@ -152,18 +163,47 @@ The test suite currently covers:
 - ✅ Data parsing (total, meter_id, timestamp)
 - ✅ MQTT message structure validation
 - ✅ Configuration and environment variable handling
+- ✅ Home Assistant discovery payloads, against a real broker in CI
 - ✅ Browser options setup and the run loop
 
-Current test coverage: **95.36%**
+Current test coverage: **94.53%**
 
 # Home assistant
-If you want it in Home Assistant as a sensor use the follow MQTT Image code:
+
+## Automatic setup (mqtt discovery)
+Nothing to configure. After the first successful run the scraper announces
+itself to Home Assistant, and a **Minvandforsyning** device shows up under
+Settings -> Devices & Services -> MQTT with three entities:
+
+| Entity | Description |
+| ----------- | ----------- |
+| Total | The total of used water in m3, ready for the energy dashboard |
+| Last reading | When the meter was read |
+| Meter number | Your meter number |
+
+The entities go `unavailable` if the scraper cannot deliver a reading, so you
+can alert on it. The discovery messages are retained, which means the device
+survives a Home Assistant restart.
+
+Two things to know:
+- The discovery prefix must match the one in Home Assistant. It is
+  `homeassistant` in both by default, so this only matters if you changed it.
+- **Upgrading from the manual sensor below?** Remove it from your yaml first,
+  otherwise you end up with two sensors for the same meter.
+
+To remove the device again, set `mqtt-discovery=false` and delete the retained
+messages under `homeassistant/sensor/minvandforsyning_[meter id]/`.
+
+## Manual setup
+If you would rather set the sensor up yourself, set `mqtt-discovery=false` and
+use this yaml:
 
 ```
-mqtt
+mqtt:
   sensor:
     - name: minvandforsyningdk
       state_topic: "minvandforsyningdk/total"
+      availability_topic: "minvandforsyningdk/status"
       device_class: water
       state_class: total_increasing
       unit_of_measurement: m³
@@ -171,8 +211,8 @@ mqtt
       value_template: "{{ value_json.total }}"
       json_attributes_topic: "minvandforsyningdk/total"
       json_attributes_template: >
-        { "meter_id": {{value_json.meter_id}},
-          "timestamp": {{value_json.data.timestamp}} }
+        { "meter_id": {{ value_json.meter_id }},
+          "timestamp": "{{ value_json.timestamp }}" }
 ```
 
 After that you can add it to the energy dashboard
