@@ -20,6 +20,11 @@ To use the docker image, you can run it with the following command:
 docker run ghcr.io/ttopholm/minvandforsyningdk-scraper:latest
 ```
 
+The image is built for `linux/amd64` and `linux/arm64`, so it runs on a
+raspberry pi as well. Chromium needs more shared memory than docker gives a
+container by default, so add `--shm-size=1g` (or the `shm_size` in the
+docker-compose file below).
+
 ## Docker compose
 
 To use the docker-compose, you can run it with the following command in the directory where you have your docker-compose.yml file (the mqtt broker is not included):
