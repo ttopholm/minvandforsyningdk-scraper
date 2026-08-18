@@ -77,7 +77,10 @@ jobs:
         pip install -r requirements-dev.txt
     
     - name: Install the playwright browser
-      run: playwright install --with-deps chromium
+      # no --with-deps: the apt install it runs hangs now and then, and the
+      # runner image already carries the libraries chromium needs. If one is
+      # ever missing the integration tests fail here instead of skipping.
+      run: playwright install chromium
     
     - name: Wait for the MQTT broker to be ready
       run: |
